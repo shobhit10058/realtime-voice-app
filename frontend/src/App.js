@@ -3,8 +3,9 @@ import './App.css';
 
 // Audio configuration for gpt-realtime
 const SAMPLE_RATE = 24000;
-const BUFFER_THRESHOLD = 12000; // Buffer 500ms of audio before playing (24000 * 0.5) - increased for smoother playback
-const SCHEDULE_AHEAD_TIME = 0.1; // Schedule audio 100ms ahead to prevent gaps
+const BUFFER_SIZE = 14400; // Buffer 600ms before playing (24000 * 0.6) for smoothness
+const SCHEDULE_AHEAD = 0.1; // Schedule 100ms ahead to prevent gaps
+const FIRST_CHUNK_DELAY = 0.2; // Extra 200ms delay for first chunk to ensure stability
 
 function App() {
   const [isConnected, setIsConnected] = useState(false);
@@ -20,11 +21,12 @@ function App() {
   const mediaStreamRef = useRef(null);
   const processorRef = useRef(null);
   
-  // Improved audio buffering
-  const audioBufferRef = useRef([]);  // Accumulates samples
-  const nextPlayTimeRef = useRef(0);  // Tracks when next audio should start
+  // Audio buffering for smooth playback
+  const audioBufferRef = useRef([]);    // Accumulates audio samples
+  const nextPlayTimeRef = useRef(0);    // Tracks when next audio should start
   const isStreamingRef = useRef(false);
   const activeSourcesRef = useRef([]);  // Track active audio sources for interruption
+  const hasStartedPlayingRef = useRef(false); // Track if we've started playing
 
   const addLog = useCallback((message, type = 'info') => {
     const timestamp = new Date().toLocaleTimeString();
@@ -63,9 +65,9 @@ function App() {
     });
     activeSourcesRef.current = [];
     
-    // Clear audio buffer
+    // Clear buffer
     audioBufferRef.current = [];
-    initialBufferPlayedRef.current = false;
+    hasStartedPlayingRef.current = false;
     
     // Reset timing
     if (audioContextRef.current) {
@@ -82,6 +84,8 @@ function App() {
     if (!audioContextRef.current || floatData.length === 0) return;
     
     const ctx = audioContextRef.current;
+    
+    // Create buffer and source
     const buffer = ctx.createBuffer(1, floatData.length, SAMPLE_RATE);
     buffer.getChannelData(0).set(floatData);
     
@@ -92,16 +96,16 @@ function App() {
     // Track this source for potential interruption
     activeSourcesRef.current.push(source);
     
-    // Schedule to play right after the previous chunk, with a small buffer ahead
     const currentTime = ctx.currentTime;
-    // If we've fallen behind, reset to current time + small buffer
-    if (nextPlayTimeRef.current < currentTime) {
-      nextPlayTimeRef.current = currentTime + SCHEDULE_AHEAD_TIME;
-    }
-    const startTime = nextPlayTimeRef.current;
     
-    source.start(startTime);
-    nextPlayTimeRef.current = startTime + buffer.duration;
+    // Schedule ahead to prevent gaps
+    // If we've fallen behind, reset with schedule-ahead buffer
+    if (nextPlayTimeRef.current <= currentTime) {
+      nextPlayTimeRef.current = currentTime + SCHEDULE_AHEAD;
+    }
+    
+    source.start(nextPlayTimeRef.current);
+    nextPlayTimeRef.current += buffer.duration;
     
     // Update speaking state
     if (!isStreamingRef.current) {
@@ -109,15 +113,14 @@ function App() {
       setIsSpeaking(true);
     }
     
-    // Detect when audio ends and clean up
+    // Cleanup when audio ends
     source.onended = () => {
-      // Remove from active sources
       activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== source);
       
-      if (ctx.currentTime >= nextPlayTimeRef.current - 0.1) {
-        // No more audio scheduled - wait a bit longer before declaring done
+      // Check if all audio finished
+      if (activeSourcesRef.current.length === 0) {
         setTimeout(() => {
-          if (ctx.currentTime >= nextPlayTimeRef.current - 0.1) {
+          if (activeSourcesRef.current.length === 0) {
             isStreamingRef.current = false;
             setIsSpeaking(false);
           }
@@ -126,10 +129,7 @@ function App() {
     };
   }, []);
 
-  // Track if initial buffer has been played
-  const initialBufferPlayedRef = useRef(false);
-  
-  // Process incoming audio - buffer then play
+  // Process incoming audio - buffer then play for smoothness
   const processAudioChunk = useCallback((base64Audio) => {
     // Decode base64 to PCM
     const binaryString = atob(base64Audio);
@@ -143,13 +143,31 @@ function App() {
     // Add to buffer
     audioBufferRef.current.push(...floatData);
     
-    // First time: wait for full buffer. After that: play more frequently to reduce latency
-    const threshold = initialBufferPlayedRef.current ? 4800 : BUFFER_THRESHOLD; // 200ms after initial, 500ms first time
-    
-    if (audioBufferRef.current.length >= threshold) {
-      initialBufferPlayedRef.current = true;
-      const chunk = new Float32Array(audioBufferRef.current.splice(0, audioBufferRef.current.length));
-      scheduleAudioChunk(chunk);
+    // First time: buffer before playing. After that: play in larger chunks
+    if (!hasStartedPlayingRef.current) {
+      // Wait until we have enough buffered for smooth start
+      if (audioBufferRef.current.length >= BUFFER_SIZE) {
+        hasStartedPlayingRef.current = true;
+        
+        // Resume AudioContext if suspended (required by browsers)
+        if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+          audioContextRef.current.resume();
+        }
+        
+        // Set the first play time with extra delay for stability
+        if (audioContextRef.current) {
+          nextPlayTimeRef.current = audioContextRef.current.currentTime + FIRST_CHUNK_DELAY;
+        }
+        
+        const chunk = new Float32Array(audioBufferRef.current.splice(0, audioBufferRef.current.length));
+        scheduleAudioChunk(chunk);
+      }
+    } else {
+      // After first playback, play in 200ms chunks for balance between smoothness and latency
+      if (audioBufferRef.current.length >= 4800) { // 200ms chunks
+        const chunk = new Float32Array(audioBufferRef.current.splice(0, audioBufferRef.current.length));
+        scheduleAudioChunk(chunk);
+      }
     }
   }, [scheduleAudioChunk]);
 
@@ -164,9 +182,9 @@ function App() {
   // Reset audio state for new response
   const resetAudioState = useCallback(() => {
     audioBufferRef.current = [];
-    initialBufferPlayedRef.current = false;  // Reset for new response
+    hasStartedPlayingRef.current = false;
     if (audioContextRef.current) {
-      nextPlayTimeRef.current = audioContextRef.current.currentTime + SCHEDULE_AHEAD_TIME;
+      nextPlayTimeRef.current = audioContextRef.current.currentTime + SCHEDULE_AHEAD;
     }
   }, []);
 

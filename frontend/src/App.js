@@ -3,9 +3,6 @@ import './App.css';
 
 // Audio configuration for gpt-realtime
 const SAMPLE_RATE = 24000;
-const BUFFER_SIZE = 14400; // Buffer 600ms before playing (24000 * 0.6) for smoothness
-const SCHEDULE_AHEAD = 0.1; // Schedule 100ms ahead to prevent gaps
-const FIRST_CHUNK_DELAY = 0.2; // Extra 200ms delay for first chunk to ensure stability
 
 function App() {
   const [isConnected, setIsConnected] = useState(false);
@@ -21,12 +18,9 @@ function App() {
   const mediaStreamRef = useRef(null);
   const processorRef = useRef(null);
   
-  // Audio buffering for smooth playback
-  const audioBufferRef = useRef([]);    // Accumulates audio samples
-  const nextPlayTimeRef = useRef(0);    // Tracks when next audio should start
+  // PCM Player approach - more reliable for streaming
+  const pcmPlayerRef = useRef(null);
   const isStreamingRef = useRef(false);
-  const activeSourcesRef = useRef([]);  // Track active audio sources for interruption
-  const hasStartedPlayingRef = useRef(false); // Track if we've started playing
 
   const addLog = useCallback((message, type = 'info') => {
     const timestamp = new Date().toLocaleTimeString();
@@ -53,84 +47,164 @@ function App() {
     return float32Array;
   };
 
-  // Stop all playing audio (for interruption handling)
-  const stopAllAudio = useCallback(() => {
-    // Stop all active audio sources
-    activeSourcesRef.current.forEach(source => {
-      try {
-        source.stop();
-      } catch (e) {
-        // Source may have already ended
-      }
-    });
-    activeSourcesRef.current = [];
-    
-    // Clear buffer
-    audioBufferRef.current = [];
-    hasStartedPlayingRef.current = false;
-    
-    // Reset timing
-    if (audioContextRef.current) {
-      nextPlayTimeRef.current = audioContextRef.current.currentTime;
+  // Simple PCM Player class for streaming audio
+  class PCMPlayer {
+    constructor(options) {
+      this.sampleRate = options.sampleRate || 24000;
+      this.channels = options.channels || 1;
+      this.flushTime = options.flushTime || 200; // ms to wait before flushing
+      
+      this.audioCtx = null;
+      this.gainNode = null;
+      this.startTime = 0;
+      this.samples = new Float32Array(0);
+      this.flushTimer = null;
+      this.isPlaying = false;
+      this.onPlayingChange = options.onPlayingChange || (() => {});
     }
     
-    // Update state
+    init() {
+      this.audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+        sampleRate: this.sampleRate
+      });
+      this.gainNode = this.audioCtx.createGain();
+      this.gainNode.gain.value = 1;
+      this.gainNode.connect(this.audioCtx.destination);
+      this.startTime = this.audioCtx.currentTime;
+    }
+    
+    feed(data) {
+      if (!this.audioCtx) this.init();
+      
+      // Resume if suspended
+      if (this.audioCtx.state === 'suspended') {
+        this.audioCtx.resume();
+      }
+      
+      // Append new data to samples
+      const newSamples = new Float32Array(this.samples.length + data.length);
+      newSamples.set(this.samples);
+      newSamples.set(data, this.samples.length);
+      this.samples = newSamples;
+      
+      // Clear existing flush timer
+      if (this.flushTimer) {
+        clearTimeout(this.flushTimer);
+      }
+      
+      // Flush after collecting enough samples (500ms worth) or after flushTime
+      if (this.samples.length >= this.sampleRate * 0.5) {
+        this.flush();
+      } else {
+        this.flushTimer = setTimeout(() => this.flush(), this.flushTime);
+      }
+    }
+    
+    flush() {
+      if (!this.audioCtx || this.samples.length === 0) return;
+      
+      if (this.flushTimer) {
+        clearTimeout(this.flushTimer);
+        this.flushTimer = null;
+      }
+      
+      const bufferSource = this.audioCtx.createBufferSource();
+      const buffer = this.audioCtx.createBuffer(this.channels, this.samples.length, this.sampleRate);
+      buffer.getChannelData(0).set(this.samples);
+      
+      bufferSource.buffer = buffer;
+      bufferSource.connect(this.gainNode);
+      
+      // Schedule to play
+      const currentTime = this.audioCtx.currentTime;
+      if (this.startTime < currentTime) {
+        this.startTime = currentTime;
+      }
+      
+      bufferSource.start(this.startTime);
+      this.startTime += buffer.duration;
+      
+      // Track playing state
+      if (!this.isPlaying) {
+        this.isPlaying = true;
+        this.onPlayingChange(true);
+      }
+      
+      bufferSource.onended = () => {
+        // Check if this was the last scheduled buffer
+        if (this.audioCtx.currentTime >= this.startTime - 0.1) {
+          setTimeout(() => {
+            if (this.audioCtx.currentTime >= this.startTime - 0.1 && this.samples.length === 0) {
+              this.isPlaying = false;
+              this.onPlayingChange(false);
+            }
+          }, 300);
+        }
+      };
+      
+      // Clear the samples
+      this.samples = new Float32Array(0);
+    }
+    
+    stop() {
+      if (this.flushTimer) {
+        clearTimeout(this.flushTimer);
+        this.flushTimer = null;
+      }
+      
+      // Fade out
+      if (this.gainNode && this.audioCtx) {
+        const now = this.audioCtx.currentTime;
+        this.gainNode.gain.setValueAtTime(this.gainNode.gain.value, now);
+        this.gainNode.gain.linearRampToValueAtTime(0, now + 0.1);
+        
+        // Reset after fade
+        setTimeout(() => {
+          if (this.gainNode) {
+            this.gainNode.gain.setValueAtTime(1, this.audioCtx.currentTime);
+          }
+        }, 150);
+      }
+      
+      this.samples = new Float32Array(0);
+      this.startTime = this.audioCtx ? this.audioCtx.currentTime : 0;
+      this.isPlaying = false;
+      this.onPlayingChange(false);
+    }
+    
+    destroy() {
+      this.stop();
+      if (this.audioCtx) {
+        this.audioCtx.close();
+        this.audioCtx = null;
+      }
+    }
+  }
+
+  // Stop all playing audio (for interruption handling)
+  const stopAllAudio = useCallback(() => {
+    if (pcmPlayerRef.current) {
+      pcmPlayerRef.current.stop();
+    }
     isStreamingRef.current = false;
     setIsSpeaking(false);
   }, []);
 
-  // Schedule audio chunk for seamless playback
-  const scheduleAudioChunk = useCallback((floatData) => {
-    if (!audioContextRef.current || floatData.length === 0) return;
-    
-    const ctx = audioContextRef.current;
-    
-    // Create buffer and source
-    const buffer = ctx.createBuffer(1, floatData.length, SAMPLE_RATE);
-    buffer.getChannelData(0).set(floatData);
-    
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(ctx.destination);
-    
-    // Track this source for potential interruption
-    activeSourcesRef.current.push(source);
-    
-    const currentTime = ctx.currentTime;
-    
-    // Schedule ahead to prevent gaps
-    // If we've fallen behind, reset with schedule-ahead buffer
-    if (nextPlayTimeRef.current <= currentTime) {
-      nextPlayTimeRef.current = currentTime + SCHEDULE_AHEAD;
-    }
-    
-    source.start(nextPlayTimeRef.current);
-    nextPlayTimeRef.current += buffer.duration;
-    
-    // Update speaking state
-    if (!isStreamingRef.current) {
-      isStreamingRef.current = true;
-      setIsSpeaking(true);
-    }
-    
-    // Cleanup when audio ends
-    source.onended = () => {
-      activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== source);
-      
-      // Check if all audio finished
-      if (activeSourcesRef.current.length === 0) {
-        setTimeout(() => {
-          if (activeSourcesRef.current.length === 0) {
-            isStreamingRef.current = false;
-            setIsSpeaking(false);
-          }
-        }, 200);
-      }
-    };
-  }, []);
-
-  // Process incoming audio - buffer then play for smoothness
+  // Process incoming audio
   const processAudioChunk = useCallback((base64Audio) => {
+    // Initialize player if needed
+    if (!pcmPlayerRef.current) {
+      pcmPlayerRef.current = new PCMPlayer({
+        sampleRate: SAMPLE_RATE,
+        channels: 1,
+        flushTime: 150,
+        onPlayingChange: (playing) => {
+          isStreamingRef.current = playing;
+          setIsSpeaking(playing);
+        }
+      });
+    }
+    
     // Decode base64 to PCM
     const binaryString = atob(base64Audio);
     const bytes = new Uint8Array(binaryString.length);
@@ -140,51 +214,24 @@ function App() {
     const int16Data = new Int16Array(bytes.buffer);
     const floatData = int16ToFloat32(int16Data);
     
-    // Add to buffer
-    audioBufferRef.current.push(...floatData);
-    
-    // First time: buffer before playing. After that: play in larger chunks
-    if (!hasStartedPlayingRef.current) {
-      // Wait until we have enough buffered for smooth start
-      if (audioBufferRef.current.length >= BUFFER_SIZE) {
-        hasStartedPlayingRef.current = true;
-        
-        // Resume AudioContext if suspended (required by browsers)
-        if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
-          audioContextRef.current.resume();
-        }
-        
-        // Set the first play time with extra delay for stability
-        if (audioContextRef.current) {
-          nextPlayTimeRef.current = audioContextRef.current.currentTime + FIRST_CHUNK_DELAY;
-        }
-        
-        const chunk = new Float32Array(audioBufferRef.current.splice(0, audioBufferRef.current.length));
-        scheduleAudioChunk(chunk);
-      }
-    } else {
-      // After first playback, play in 200ms chunks for balance between smoothness and latency
-      if (audioBufferRef.current.length >= 4800) { // 200ms chunks
-        const chunk = new Float32Array(audioBufferRef.current.splice(0, audioBufferRef.current.length));
-        scheduleAudioChunk(chunk);
-      }
-    }
-  }, [scheduleAudioChunk]);
+    // Feed to player
+    pcmPlayerRef.current.feed(floatData);
+  }, []);
 
   // Flush remaining audio buffer
   const flushAudioBuffer = useCallback(() => {
-    if (audioBufferRef.current.length > 0) {
-      const chunk = new Float32Array(audioBufferRef.current.splice(0, audioBufferRef.current.length));
-      scheduleAudioChunk(chunk);
+    if (pcmPlayerRef.current) {
+      pcmPlayerRef.current.flush();
     }
-  }, [scheduleAudioChunk]);
+  }, []);
 
   // Reset audio state for new response
   const resetAudioState = useCallback(() => {
-    audioBufferRef.current = [];
-    hasStartedPlayingRef.current = false;
-    if (audioContextRef.current) {
-      nextPlayTimeRef.current = audioContextRef.current.currentTime + SCHEDULE_AHEAD;
+    if (pcmPlayerRef.current) {
+      pcmPlayerRef.current.samples = new Float32Array(0);
+      if (pcmPlayerRef.current.audioCtx) {
+        pcmPlayerRef.current.startTime = pcmPlayerRef.current.audioCtx.currentTime;
+      }
     }
   }, []);
 
@@ -415,6 +462,12 @@ function App() {
       audioContextRef.current = null;
     }
     
+    // Cleanup PCM player
+    if (pcmPlayerRef.current) {
+      pcmPlayerRef.current.destroy();
+      pcmPlayerRef.current = null;
+    }
+    
     audioBufferRef.current = [];
     isStreamingRef.current = false;
     setIsConnected(false);
@@ -438,6 +491,7 @@ function App() {
       if (wsRef.current) wsRef.current.close();
       if (mediaStreamRef.current) mediaStreamRef.current.getTracks().forEach(t => t.stop());
       if (audioContextRef.current) audioContextRef.current.close();
+      if (pcmPlayerRef.current) pcmPlayerRef.current.destroy();
     };
   }, []);
 

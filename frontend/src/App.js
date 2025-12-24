@@ -3,7 +3,8 @@ import './App.css';
 
 // Audio configuration for gpt-realtime
 const SAMPLE_RATE = 24000;
-const BUFFER_THRESHOLD = 4800; // Buffer 200ms of audio before playing (24000 * 0.2)
+const BUFFER_THRESHOLD = 12000; // Buffer 500ms of audio before playing (24000 * 0.5) - increased for smoother playback
+const SCHEDULE_AHEAD_TIME = 0.1; // Schedule audio 100ms ahead to prevent gaps
 
 function App() {
   const [isConnected, setIsConnected] = useState(false);
@@ -61,9 +62,13 @@ function App() {
     source.buffer = buffer;
     source.connect(ctx.destination);
     
-    // Schedule to play right after the previous chunk
+    // Schedule to play right after the previous chunk, with a small buffer ahead
     const currentTime = ctx.currentTime;
-    const startTime = Math.max(currentTime, nextPlayTimeRef.current);
+    // If we've fallen behind, reset to current time + small buffer
+    if (nextPlayTimeRef.current < currentTime) {
+      nextPlayTimeRef.current = currentTime + SCHEDULE_AHEAD_TIME;
+    }
+    const startTime = nextPlayTimeRef.current;
     
     source.start(startTime);
     nextPlayTimeRef.current = startTime + buffer.duration;
@@ -76,18 +81,21 @@ function App() {
     
     // Detect when audio ends
     source.onended = () => {
-      if (ctx.currentTime >= nextPlayTimeRef.current - 0.05) {
-        // No more audio scheduled
+      if (ctx.currentTime >= nextPlayTimeRef.current - 0.1) {
+        // No more audio scheduled - wait a bit longer before declaring done
         setTimeout(() => {
-          if (ctx.currentTime >= nextPlayTimeRef.current - 0.05) {
+          if (ctx.currentTime >= nextPlayTimeRef.current - 0.1) {
             isStreamingRef.current = false;
             setIsSpeaking(false);
           }
-        }, 100);
+        }, 200);
       }
     };
   }, []);
 
+  // Track if initial buffer has been played
+  const initialBufferPlayedRef = useRef(false);
+  
   // Process incoming audio - buffer then play
   const processAudioChunk = useCallback((base64Audio) => {
     // Decode base64 to PCM
@@ -102,8 +110,11 @@ function App() {
     // Add to buffer
     audioBufferRef.current.push(...floatData);
     
-    // Play when we have enough buffered (smooth playback)
-    if (audioBufferRef.current.length >= BUFFER_THRESHOLD) {
+    // First time: wait for full buffer. After that: play more frequently to reduce latency
+    const threshold = initialBufferPlayedRef.current ? 4800 : BUFFER_THRESHOLD; // 200ms after initial, 500ms first time
+    
+    if (audioBufferRef.current.length >= threshold) {
+      initialBufferPlayedRef.current = true;
       const chunk = new Float32Array(audioBufferRef.current.splice(0, audioBufferRef.current.length));
       scheduleAudioChunk(chunk);
     }
@@ -120,8 +131,9 @@ function App() {
   // Reset audio state for new response
   const resetAudioState = useCallback(() => {
     audioBufferRef.current = [];
+    initialBufferPlayedRef.current = false;  // Reset for new response
     if (audioContextRef.current) {
-      nextPlayTimeRef.current = audioContextRef.current.currentTime;
+      nextPlayTimeRef.current = audioContextRef.current.currentTime + SCHEDULE_AHEAD_TIME;
     }
   }, []);
 
@@ -132,7 +144,7 @@ function App() {
       
       switch (data.type) {
         case 'session.created':
-          addLog('Session created!', 'success');
+          addLog('Session created by Azure', 'success');
           break;
           
         case 'session.updated':
@@ -142,6 +154,11 @@ function App() {
           break;
           
         case 'input_audio_buffer.speech_started':
+          // Ignore user speech while AI is speaking
+          if (isStreamingRef.current) {
+            // Don't process - AI is still talking
+            break;
+          }
           addLog('Speech detected...', 'info');
           setTranscript('(Listening...)');
           setAiResponse('');
@@ -258,27 +275,24 @@ function App() {
         setStatus('Configuring session...');
 
         // Configure session using config from backend
+        // Azure OpenAI Realtime API uses a different format than OpenAI
         const sessionConfig = config.session_config || {};
+        const instructions = sessionConfig.instructions || 'You are a helpful voice assistant.';
+        const voice = sessionConfig.voice || 'alloy';
+        
+        // Azure OpenAI Realtime API - try minimal config
+        // Azure seems to reject many standard OpenAI parameters
         const sessionUpdate = {
           type: 'session.update',
           session: {
-            modalities: ['text', 'audio'],
-            instructions: sessionConfig.instructions || 'You are a helpful voice assistant.',
-            voice: sessionConfig.voice || 'alloy',
-            input_audio_format: 'pcm16',
-            output_audio_format: 'pcm16',
-            turn_detection: sessionConfig.turn_detection || {
-              type: 'server_vad',
-              threshold: 0.5,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 500,
-              create_response: true,
-            }
+            type: 'realtime',
+            instructions: instructions
           }
         };
-        console.log('Session config:', JSON.stringify(sessionUpdate, null, 2));
+        console.log('Sending session.update with instructions:', instructions.substring(0, 100));
+        console.log('Full session.update:', JSON.stringify(sessionUpdate, null, 2));
         ws.send(JSON.stringify(sessionUpdate));
-        addLog(`Using voice: ${sessionConfig.voice || 'alloy'}`, 'info');
+        addLog(`Using voice: ${voice}`, 'info');
 
         // Set up audio processing
         const source = audioContextRef.current.createMediaStreamSource(stream);

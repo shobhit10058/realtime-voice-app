@@ -17,6 +17,7 @@ function App() {
   const audioContextRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const processorRef = useRef(null);
+  const workletNodeRef = useRef(null);
   
   // PCM Player approach - more reliable for streaming
   const pcmPlayerRef = useRef(null);
@@ -47,20 +48,25 @@ function App() {
     return float32Array;
   };
 
-  // Simple PCM Player class for streaming audio
+  // Improved PCM Player class for smooth streaming audio
   class PCMPlayer {
     constructor(options) {
       this.sampleRate = options.sampleRate || 24000;
       this.channels = options.channels || 1;
-      this.flushTime = options.flushTime || 200; // ms to wait before flushing
       
       this.audioCtx = null;
       this.gainNode = null;
-      this.startTime = 0;
+      this.scheduledTime = 0;
       this.samples = new Float32Array(0);
-      this.flushTimer = null;
       this.isPlaying = false;
       this.onPlayingChange = options.onPlayingChange || (() => {});
+      
+      // Buffering settings for smooth playback
+      this.minBufferSize = Math.floor(this.sampleRate * 0.08); // 80ms minimum buffer before playing
+      this.maxBufferSize = Math.floor(this.sampleRate * 0.3);  // 300ms max buffer before forcing flush
+      this.isBuffering = true; // Start in buffering mode
+      this.scheduledBuffers = [];
+      this.endCheckTimer = null;
     }
     
     init() {
@@ -70,7 +76,7 @@ function App() {
       this.gainNode = this.audioCtx.createGain();
       this.gainNode.gain.value = 1;
       this.gainNode.connect(this.audioCtx.destination);
-      this.startTime = this.audioCtx.currentTime;
+      this.scheduledTime = this.audioCtx.currentTime;
     }
     
     feed(data) {
@@ -87,26 +93,30 @@ function App() {
       newSamples.set(data, this.samples.length);
       this.samples = newSamples;
       
-      // Clear existing flush timer
-      if (this.flushTimer) {
-        clearTimeout(this.flushTimer);
+      // Decide when to flush based on buffer state
+      if (this.isBuffering) {
+        // Initial buffering - wait for minimum buffer before starting
+        if (this.samples.length >= this.minBufferSize) {
+          this.isBuffering = false;
+          this.flush();
+        }
+      } else {
+        // Streaming mode - flush when we have enough for smooth playback
+        // Use smaller chunks for lower latency
+        const chunkSize = Math.floor(this.sampleRate * 0.1); // 100ms chunks
+        if (this.samples.length >= chunkSize) {
+          this.flush();
+        }
       }
       
-      // Flush after collecting enough samples (500ms worth) or after flushTime
-      if (this.samples.length >= this.sampleRate * 0.5) {
+      // Force flush if buffer gets too large (prevents memory issues)
+      if (this.samples.length >= this.maxBufferSize) {
         this.flush();
-      } else {
-        this.flushTimer = setTimeout(() => this.flush(), this.flushTime);
       }
     }
     
     flush() {
       if (!this.audioCtx || this.samples.length === 0) return;
-      
-      if (this.flushTimer) {
-        clearTimeout(this.flushTimer);
-        this.flushTimer = null;
-      }
       
       const bufferSource = this.audioCtx.createBufferSource();
       const buffer = this.audioCtx.createBuffer(this.channels, this.samples.length, this.sampleRate);
@@ -115,14 +125,20 @@ function App() {
       bufferSource.buffer = buffer;
       bufferSource.connect(this.gainNode);
       
-      // Schedule to play
+      // Schedule playback - ensure continuous audio without gaps
       const currentTime = this.audioCtx.currentTime;
-      if (this.startTime < currentTime) {
-        this.startTime = currentTime;
+      const scheduleAhead = 0.02; // 20ms lookahead for scheduling
+      
+      if (this.scheduledTime < currentTime + scheduleAhead) {
+        // We're behind or just starting - schedule immediately with small delay
+        this.scheduledTime = currentTime + scheduleAhead;
       }
       
-      bufferSource.start(this.startTime);
-      this.startTime += buffer.duration;
+      bufferSource.start(this.scheduledTime);
+      this.scheduledTime += buffer.duration;
+      
+      // Track this buffer for cleanup
+      this.scheduledBuffers.push(bufferSource);
       
       // Track playing state
       if (!this.isPlaying) {
@@ -130,45 +146,68 @@ function App() {
         this.onPlayingChange(true);
       }
       
+      // Setup end detection
       bufferSource.onended = () => {
-        // Check if this was the last scheduled buffer
-        if (this.audioCtx.currentTime >= this.startTime - 0.1) {
-          setTimeout(() => {
-            if (this.audioCtx.currentTime >= this.startTime - 0.1 && this.samples.length === 0) {
-              this.isPlaying = false;
-              this.onPlayingChange(false);
-            }
-          }, 300);
-        }
+        // Remove from scheduled buffers
+        const idx = this.scheduledBuffers.indexOf(bufferSource);
+        if (idx > -1) this.scheduledBuffers.splice(idx, 1);
+        
+        // Check if playback is complete
+        this.checkPlaybackEnd();
       };
       
       // Clear the samples
       this.samples = new Float32Array(0);
     }
     
-    stop() {
-      if (this.flushTimer) {
-        clearTimeout(this.flushTimer);
-        this.flushTimer = null;
+    checkPlaybackEnd() {
+      // Debounce the end check
+      if (this.endCheckTimer) {
+        clearTimeout(this.endCheckTimer);
       }
+      
+      this.endCheckTimer = setTimeout(() => {
+        if (this.audioCtx && 
+            this.scheduledBuffers.length === 0 && 
+            this.samples.length === 0 &&
+            this.audioCtx.currentTime >= this.scheduledTime - 0.05) {
+          this.isPlaying = false;
+          this.isBuffering = true; // Reset to buffering mode for next response
+          this.onPlayingChange(false);
+        }
+      }, 200);
+    }
+    
+    stop() {
+      if (this.endCheckTimer) {
+        clearTimeout(this.endCheckTimer);
+        this.endCheckTimer = null;
+      }
+      
+      // Stop all scheduled buffers
+      this.scheduledBuffers.forEach(buf => {
+        try { buf.stop(); } catch(e) {}
+      });
+      this.scheduledBuffers = [];
       
       // Fade out
       if (this.gainNode && this.audioCtx) {
         const now = this.audioCtx.currentTime;
         this.gainNode.gain.setValueAtTime(this.gainNode.gain.value, now);
-        this.gainNode.gain.linearRampToValueAtTime(0, now + 0.1);
+        this.gainNode.gain.linearRampToValueAtTime(0, now + 0.05);
         
-        // Reset after fade
+        // Reset gain after fade
         setTimeout(() => {
-          if (this.gainNode) {
+          if (this.gainNode && this.audioCtx) {
             this.gainNode.gain.setValueAtTime(1, this.audioCtx.currentTime);
           }
-        }, 150);
+        }, 100);
       }
       
       this.samples = new Float32Array(0);
-      this.startTime = this.audioCtx ? this.audioCtx.currentTime : 0;
+      this.scheduledTime = this.audioCtx ? this.audioCtx.currentTime : 0;
       this.isPlaying = false;
+      this.isBuffering = true;
       this.onPlayingChange(false);
     }
     
@@ -197,7 +236,6 @@ function App() {
       pcmPlayerRef.current = new PCMPlayer({
         sampleRate: SAMPLE_RATE,
         channels: 1,
-        flushTime: 150,
         onPlayingChange: (playing) => {
           isStreamingRef.current = playing;
           setIsSpeaking(playing);
@@ -229,8 +267,9 @@ function App() {
   const resetAudioState = useCallback(() => {
     if (pcmPlayerRef.current) {
       pcmPlayerRef.current.samples = new Float32Array(0);
+      pcmPlayerRef.current.isBuffering = true;
       if (pcmPlayerRef.current.audioCtx) {
-        pcmPlayerRef.current.startTime = pcmPlayerRef.current.audioCtx.currentTime;
+        pcmPlayerRef.current.scheduledTime = pcmPlayerRef.current.audioCtx.currentTime;
       }
     }
   }, []);
@@ -371,7 +410,7 @@ function App() {
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
-      ws.onopen = () => {
+      ws.onopen = async () => {
         addLog('WebSocket connected!', 'success');
         setIsConnected(true);
         setStatus('Configuring session...');
@@ -396,26 +435,58 @@ function App() {
         ws.send(JSON.stringify(sessionUpdate));
         addLog(`Using voice: ${voice}`, 'info');
 
-        // Set up audio processing
-        const source = audioContextRef.current.createMediaStreamSource(stream);
-        const processor = audioContextRef.current.createScriptProcessor(4096, 1, 1);
-        processorRef.current = processor;
+        // Set up audio processing using AudioWorklet (modern, non-deprecated API)
+        try {
+          await audioContextRef.current.audioWorklet.addModule('/audio-processor.js');
+          
+          const source = audioContextRef.current.createMediaStreamSource(stream);
+          const workletNode = new AudioWorkletNode(audioContextRef.current, 'audio-capture-processor');
+          workletNodeRef.current = workletNode;
 
-        processor.onaudioprocess = (e) => {
-          if (ws.readyState === WebSocket.OPEN) {
-            const inputData = e.inputBuffer.getChannelData(0);
-            const pcmData = floatTo16BitPCM(inputData);
-            const base64 = btoa(String.fromCharCode(...new Uint8Array(pcmData.buffer)));
-            
-            ws.send(JSON.stringify({
-              type: 'input_audio_buffer.append',
-              audio: base64
-            }));
-          }
-        };
+          // Handle audio data from the worklet
+          workletNode.port.onmessage = (event) => {
+            if (ws.readyState === WebSocket.OPEN && event.data.audioData) {
+              const pcmData = floatTo16BitPCM(event.data.audioData);
+              const base64 = btoa(String.fromCharCode(...new Uint8Array(pcmData.buffer)));
+              
+              ws.send(JSON.stringify({
+                type: 'input_audio_buffer.append',
+                audio: base64
+              }));
+            }
+          };
 
-        source.connect(processor);
-        processor.connect(audioContextRef.current.destination);
+          source.connect(workletNode);
+          // AudioWorkletNode doesn't need to connect to destination for input processing
+          // but we keep a silent connection to ensure the audio graph stays active
+          workletNode.connect(audioContextRef.current.destination);
+          
+          addLog('Audio worklet initialized', 'success');
+        } catch (workletError) {
+          // Fallback to ScriptProcessorNode for older browsers
+          console.warn('AudioWorklet not supported, falling back to ScriptProcessor:', workletError);
+          addLog('Using legacy audio processor', 'warning');
+          
+          const source = audioContextRef.current.createMediaStreamSource(stream);
+          const processor = audioContextRef.current.createScriptProcessor(4096, 1, 1);
+          processorRef.current = processor;
+
+          processor.onaudioprocess = (e) => {
+            if (ws.readyState === WebSocket.OPEN) {
+              const inputData = e.inputBuffer.getChannelData(0);
+              const pcmData = floatTo16BitPCM(inputData);
+              const base64 = btoa(String.fromCharCode(...new Uint8Array(pcmData.buffer)));
+              
+              ws.send(JSON.stringify({
+                type: 'input_audio_buffer.append',
+                audio: base64
+              }));
+            }
+          };
+
+          source.connect(processor);
+          processor.connect(audioContextRef.current.destination);
+        }
       };
 
       ws.onmessage = handleMessage;
@@ -442,6 +513,13 @@ function App() {
   const stopSession = useCallback(() => {
     addLog('Stopping session...', 'info');
     
+    // Cleanup AudioWorklet node
+    if (workletNodeRef.current) {
+      workletNodeRef.current.disconnect();
+      workletNodeRef.current = null;
+    }
+    
+    // Cleanup legacy ScriptProcessor (fallback)
     if (processorRef.current) {
       processorRef.current.disconnect();
       processorRef.current = null;
@@ -468,7 +546,6 @@ function App() {
       pcmPlayerRef.current = null;
     }
     
-    audioBufferRef.current = [];
     isStreamingRef.current = false;
     setIsConnected(false);
     setIsListening(false);
@@ -488,6 +565,8 @@ function App() {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      if (workletNodeRef.current) workletNodeRef.current.disconnect();
+      if (processorRef.current) processorRef.current.disconnect();
       if (wsRef.current) wsRef.current.close();
       if (mediaStreamRef.current) mediaStreamRef.current.getTracks().forEach(t => t.stop());
       if (audioContextRef.current) audioContextRef.current.close();

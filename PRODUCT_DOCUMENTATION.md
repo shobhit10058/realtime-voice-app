@@ -25,11 +25,11 @@ GPT Realtime Voice Chat is a real-time voice conversation application powered by
 ### Components
 
 1. **Frontend (React)**
-   - Captures microphone audio using Web Audio API
+   - Captures microphone audio using Web Audio API (ScriptProcessorNode)
    - Converts audio to PCM16 format (24kHz sample rate)
-   - Streams audio to backend via WebSocket
-   - Receives and plays AI audio responses
-   - Handles interruption (barge-in)
+   - Streams audio to backend via WebSocket (base64 encoded)
+   - **PCMPlayer class** handles audio playback with smart buffering
+   - Handles interruption (barge-in) with smooth fade-out
 
 2. **Backend (Flask + Flask-Sock)**
    - Acts as WebSocket proxy to Azure OpenAI
@@ -43,6 +43,91 @@ GPT Realtime Voice Chat is a real-time voice conversation application powered by
    - Transcribes speech in real-time
    - Generates AI responses
    - Streams audio output back
+
+---
+
+## Audio Playback Architecture
+
+### The Challenge
+
+Azure OpenAI Realtime API streams audio in **irregular chunks**. The timing and size of chunks varies due to:
+- Network jitter
+- Server-side audio generation patterns
+- WebSocket message batching
+
+This irregularity causes audio breakups if chunks are played immediately as received.
+
+### Solution: PCMPlayer Class
+
+```javascript
+class PCMPlayer {
+  constructor(sampleRate = 24000) {
+    this.sampleRate = sampleRate;
+    this.accumulatedSamples = [];      // Buffer for incoming samples
+    this.nextScheduledTime = 0;         // Next playback time
+    this.SAMPLES_THRESHOLD = 12000;     // 500ms @ 24kHz
+    this.FLUSH_TIMEOUT_MS = 150;        // Force flush after no data
+  }
+}
+```
+
+### How It Works
+
+```
+Chunks arrive irregularly → Accumulate in buffer → 
+  ↓
+When buffer has 500ms (12000 samples) OR 150ms timeout → Flush
+  ↓
+Schedule audio buffer at next available time → 
+  ↓
+Seamless playback with no gaps
+```
+
+### Key Features
+
+| Feature | Implementation |
+|---------|----------------|
+| **Accumulation** | Collects samples until 500ms threshold |
+| **Timeout Flush** | Forces playback after 150ms silence (end of response) |
+| **Gap Prevention** | Schedules buffers sequentially with precise timing |
+| **Smooth Stop** | 50ms fade-out on interruption (no clicks) |
+| **Lazy Init** | Creates AudioContext only when needed |
+
+### Audio Flow Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          Frontend Audio Pipeline                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  WebSocket Message                                                       │
+│       │                                                                  │
+│       ▼                                                                  │
+│  ┌──────────────┐                                                        │
+│  │ Base64 Decode │  →  Raw PCM16 bytes                                  │
+│  └──────────────┘                                                        │
+│       │                                                                  │
+│       ▼                                                                  │
+│  ┌──────────────┐                                                        │
+│  │ Int16 → Float │  →  Float32Array (-1.0 to 1.0)                       │
+│  └──────────────┘                                                        │
+│       │                                                                  │
+│       ▼                                                                  │
+│  ┌────────────────────────────────────────────────────────────────────┐ │
+│  │                         PCMPlayer                                   │ │
+│  │  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐ │ │
+│  │  │ Accumulate      │ →  │ Threshold Check │ →  │ Schedule Audio  │ │ │
+│  │  │ Samples         │    │ (500ms/150ms)   │    │ Buffer          │ │ │
+│  │  └─────────────────┘    └─────────────────┘    └─────────────────┘ │ │
+│  └────────────────────────────────────────────────────────────────────┘ │
+│       │                                                                  │
+│       ▼                                                                  │
+│  ┌──────────────┐                                                        │
+│  │ AudioContext │  →  Speaker Output                                    │
+│  └──────────────┘                                                        │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -229,11 +314,21 @@ turn_detection = {
 }
 ```
 
+### PCMPlayer Settings (Frontend)
+
+```javascript
+const SAMPLE_RATE = 24000;           // Must match Azure output
+const SAMPLES_THRESHOLD = 12000;     // 500ms buffer before playback
+const FLUSH_TIMEOUT_MS = 150;        // Force flush after no new data
+const FADE_OUT_DURATION = 0.05;      // 50ms fade for smooth stop
+```
+
 ### Audio Format
 
 - **Sample Rate**: 24,000 Hz
 - **Format**: PCM16 (16-bit signed integer)
 - **Channels**: Mono
+- **Encoding**: Base64 over WebSocket
 
 ---
 
@@ -246,19 +341,23 @@ turn_detection = {
 
 ### 2. Interruption Handling (Barge-In)
 - User can interrupt AI mid-response
-- AI audio stops immediately
-- New user input is processed
+- **Smooth fade-out** (50ms) prevents audio clicks
+- Server VAD detects speech and initiates new response
+- No explicit `response.cancel` needed (lets server handle naturally)
 
-### 3. Smart Audio Buffering
-- Initial 500ms buffer for smooth playback
-- Dynamic 200ms chunks after buffering
-- Gap prevention with schedule-ahead timing
+### 3. PCMPlayer Audio Engine
+- **Accumulation-based buffering**: Collects audio samples until 500ms worth
+- **Smart flush timeout**: Flushes remaining audio after 150ms of no new data (handles irregular chunks)
+- **Seamless scheduling**: Uses Web Audio API `AudioBufferSourceNode` with precise timing
+- **Smooth interruption**: 50ms fade-out on stop (no audio clicks)
+- **Self-managing lifecycle**: Encapsulated class handles AudioContext creation/destruction
 
 ### 4. System Prompt Customization
-- Configurable AI personality
-- Response length control
-- Honesty enforcement (no guessing)
-- Voice clarity handling (ask to repeat)
+- Configurable AI personality (sarcastic, helpful, etc.)
+- Response length control (1-2 sentence concise answers)
+- **Honesty enforcement**: Never guesses facts, says "I don't know"
+- **Voice clarity handling**: Asks user to repeat if audio unclear
+- Multi-language support: English, Hindi, Hinglish
 
 ### 5. Latency Tracking
 - Comprehensive logging
@@ -269,15 +368,19 @@ turn_detection = {
 
 ## Best Practices
 
-1. **Keep Responses Short**: Configure AI for concise answers to minimize streaming time.
+1. **Keep Responses Short**: Configure AI for concise 1-2 sentence answers to minimize streaming time.
 
 2. **Handle Network Issues**: Implement reconnection logic for dropped connections.
 
-3. **Buffer Audio**: Use initial buffering to prevent choppy playback.
+3. **Accumulate Before Playing**: Buffer 500ms of audio before starting playback to handle irregular chunks.
 
-4. **Log Latency**: Track metrics to identify performance issues.
+4. **Use Timeout Flush**: Force-flush remaining samples after 150ms to ensure end-of-response audio plays.
 
-5. **Test Interruption**: Ensure smooth user experience when interrupting AI.
+5. **Smooth Interruption**: Use fade-out (not abrupt stop) when user interrupts to avoid clicks.
+
+6. **Log Latency**: Track TTFA, TTFT, and E2E metrics to identify performance issues.
+
+7. **Test Edge Cases**: Test with slow networks, interruptions, and long responses.
 
 ---
 
@@ -293,15 +396,19 @@ turn_detection = {
 
 ## Future Improvements
 
-1. **AudioWorklet Migration**: Replace deprecated ScriptProcessor with AudioWorklet.
+1. **AudioWorklet Migration**: Replace deprecated ScriptProcessorNode with AudioWorklet for input capture.
 
-2. **Adaptive Buffering**: Dynamically adjust buffer size based on network conditions.
+2. **Adaptive Buffering**: Dynamically adjust accumulation threshold based on network conditions.
 
-3. **Offline Detection**: Better handling of network disconnections.
+3. **WebRTC Integration**: Consider LiveKit or similar for lower latency and better NAT traversal.
 
-4. **Multi-Speaker Support**: Speaker diarization for group conversations.
+4. **Offline Detection**: Better handling of network disconnections with auto-reconnect.
+
+5. **Multi-Speaker Support**: Speaker diarization for group conversations.
+
+6. **Opus Codec**: Consider requesting Opus-encoded audio from Azure for smaller payloads.
 
 ---
 
-*Last Updated: December 24, 2025*
+*Last Updated: December 25, 2025*
 

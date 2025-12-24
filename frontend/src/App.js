@@ -24,6 +24,7 @@ function App() {
   const audioBufferRef = useRef([]);  // Accumulates samples
   const nextPlayTimeRef = useRef(0);  // Tracks when next audio should start
   const isStreamingRef = useRef(false);
+  const activeSourcesRef = useRef([]);  // Track active audio sources for interruption
 
   const addLog = useCallback((message, type = 'info') => {
     const timestamp = new Date().toLocaleTimeString();
@@ -50,6 +51,32 @@ function App() {
     return float32Array;
   };
 
+  // Stop all playing audio (for interruption handling)
+  const stopAllAudio = useCallback(() => {
+    // Stop all active audio sources
+    activeSourcesRef.current.forEach(source => {
+      try {
+        source.stop();
+      } catch (e) {
+        // Source may have already ended
+      }
+    });
+    activeSourcesRef.current = [];
+    
+    // Clear audio buffer
+    audioBufferRef.current = [];
+    initialBufferPlayedRef.current = false;
+    
+    // Reset timing
+    if (audioContextRef.current) {
+      nextPlayTimeRef.current = audioContextRef.current.currentTime;
+    }
+    
+    // Update state
+    isStreamingRef.current = false;
+    setIsSpeaking(false);
+  }, []);
+
   // Schedule audio chunk for seamless playback
   const scheduleAudioChunk = useCallback((floatData) => {
     if (!audioContextRef.current || floatData.length === 0) return;
@@ -61,6 +88,9 @@ function App() {
     const source = ctx.createBufferSource();
     source.buffer = buffer;
     source.connect(ctx.destination);
+    
+    // Track this source for potential interruption
+    activeSourcesRef.current.push(source);
     
     // Schedule to play right after the previous chunk, with a small buffer ahead
     const currentTime = ctx.currentTime;
@@ -79,8 +109,11 @@ function App() {
       setIsSpeaking(true);
     }
     
-    // Detect when audio ends
+    // Detect when audio ends and clean up
     source.onended = () => {
+      // Remove from active sources
+      activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== source);
+      
       if (ctx.currentTime >= nextPlayTimeRef.current - 0.1) {
         // No more audio scheduled - wait a bit longer before declaring done
         setTimeout(() => {
@@ -154,10 +187,14 @@ function App() {
           break;
           
         case 'input_audio_buffer.speech_started':
-          // Ignore user speech while AI is speaking
+          // Handle interruption - if AI is speaking, stop it immediately
           if (isStreamingRef.current) {
-            // Don't process - AI is still talking
-            break;
+            addLog('User interrupted - stopping AI', 'warning');
+            stopAllAudio();
+            
+            // Just stop local audio - don't send response.cancel as it may interfere
+            // with the new speech being processed
+            // The server will handle the transition automatically
           }
           addLog('Speech detected...', 'info');
           setTranscript('(Listening...)');
@@ -218,7 +255,7 @@ function App() {
     } catch (e) {
       console.error('Failed to parse message:', e);
     }
-  }, [addLog, processAudioChunk, flushAudioBuffer, resetAudioState]);
+  }, [addLog, processAudioChunk, flushAudioBuffer, resetAudioState, stopAllAudio]);
 
   // Start the voice session
   const startSession = useCallback(async () => {

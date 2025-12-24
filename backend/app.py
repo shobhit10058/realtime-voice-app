@@ -340,6 +340,9 @@ def realtime_proxy(ws):
                                 data = json.loads(message)
                                 event_type = data.get('type', '')
                                 
+                                # Debug: Log all event types received from Azure
+                                print(f"📨 Azure event: {event_type}")
+                                
                                 # Track different event types
                                 if event_type == 'input_audio_buffer.speech_started':
                                     tracker.log_speech_detected()
@@ -365,6 +368,8 @@ def realtime_proxy(ws):
                                 elif event_type == 'error':
                                     error_msg = data.get('error', {}).get('message', 'Unknown error')
                                     tracker.log_error(error_msg)
+                                    print(f"❌ Azure ERROR: {error_msg}")
+                                    print(f"   Full error: {json.dumps(data, indent=2)}")
                                     
                             except json.JSONDecodeError:
                                 pass

@@ -12,6 +12,9 @@ function App() {
   const [transcript, setTranscript] = useState('');
   const [aiResponse, setAiResponse] = useState('');
   const [logs, setLogs] = useState([]);
+  const [sarvamTranscript, setSarvamTranscript] = useState('');
+  const [isSarvamProcessing, setIsSarvamProcessing] = useState(false);
+  const [isRecordingForSarvam, setIsRecordingForSarvam] = useState(false);
 
   const wsRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -22,6 +25,10 @@ function App() {
   // PCM Player approach - more reliable for streaming
   const pcmPlayerRef = useRef(null);
   const isStreamingRef = useRef(false);
+  
+  // Sarvam AI - separate MediaRecorder for independent audio capture
+  const sarvamRecorderRef = useRef(null);
+  const sarvamChunksRef = useRef([]);
 
   const addLog = useCallback((message, type = 'info') => {
     const timestamp = new Date().toLocaleTimeString();
@@ -262,6 +269,117 @@ function App() {
       pcmPlayerRef.current.flush();
     }
   }, []);
+
+  // Start full session recording for Sarvam
+  const startSarvamFullRecording = useCallback(() => {
+    if (!mediaStreamRef.current || sarvamRecorderRef.current) return;
+    
+    try {
+      sarvamChunksRef.current = [];
+      const recorder = new MediaRecorder(mediaStreamRef.current, {
+        mimeType: 'audio/webm;codecs=opus'
+      });
+      
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          sarvamChunksRef.current.push(e.data);
+        }
+      };
+      
+      recorder.start(1000); // Collect data every 1 second
+      sarvamRecorderRef.current = recorder;
+      setIsRecordingForSarvam(true);
+      addLog('Started recording for Sarvam transcription', 'info');
+    } catch (err) {
+      console.warn('Sarvam MediaRecorder not supported:', err);
+      addLog('MediaRecorder not supported', 'error');
+    }
+  }, [addLog]);
+
+  // Stop Sarvam recording and send to API
+  const stopAndTranscribeWithSarvam = useCallback(async () => {
+    if (!sarvamRecorderRef.current) {
+      addLog('No recording to transcribe', 'warning');
+      return;
+    }
+    
+    const recorder = sarvamRecorderRef.current;
+    sarvamRecorderRef.current = null;
+    setIsRecordingForSarvam(false);
+    setIsSarvamProcessing(true);
+    setSarvamTranscript('');
+    addLog('Processing with Sarvam AI...', 'info');
+    
+    return new Promise((resolve) => {
+      recorder.onstop = async () => {
+        if (sarvamChunksRef.current.length === 0) {
+          setSarvamTranscript('(No audio recorded)');
+          setIsSarvamProcessing(false);
+          resolve();
+          return;
+        }
+        
+        try {
+          // Combine chunks into a blob
+          const audioBlob = new Blob(sarvamChunksRef.current, { type: 'audio/webm' });
+          const audioSize = audioBlob.size;
+          sarvamChunksRef.current = [];
+          
+          addLog(`Sending ${(audioSize / 1024).toFixed(1)} KB to Sarvam...`, 'info');
+          
+          // Convert blob to base64
+          const reader = new FileReader();
+          reader.onloadend = async () => {
+            const base64Audio = reader.result.split(',')[1];
+            
+            try {
+              const response = await fetch('/api/sarvam/transcribe', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  audio: base64Audio,
+                  format: 'webm',
+                  language_code: 'hi-IN'
+                })
+              });
+              
+              const result = await response.json();
+              console.log('Sarvam API result:', result);
+              
+              if (result.success) {
+                const transcript = result.transcript || '(No speech detected in audio)';
+                setSarvamTranscript(transcript);
+                if (result.transcript) {
+                  addLog(`Sarvam transcription complete!`, 'success');
+                } else {
+                  addLog('Sarvam: No speech detected', 'warning');
+                }
+              } else if (result.error) {
+                setSarvamTranscript(`Error: ${result.error}`);
+                addLog(`Sarvam error: ${result.error.substring(0, 50)}`, 'error');
+              } else {
+                setSarvamTranscript('(No response from Sarvam)');
+              }
+            } catch (error) {
+              setSarvamTranscript(`API error: ${error.message}`);
+              addLog(`Sarvam API error: ${error.message}`, 'error');
+            } finally {
+              setIsSarvamProcessing(false);
+            }
+            resolve();
+          };
+          reader.readAsDataURL(audioBlob);
+        } catch (error) {
+          console.warn('Sarvam processing error:', error);
+          setSarvamTranscript(`Processing error: ${error.message}`);
+          setIsSarvamProcessing(false);
+          resolve();
+        }
+      };
+      
+      recorder.stop();
+    });
+  }, [addLog]);
 
   // Reset audio state for new response
   const resetAudioState = useCallback(() => {
@@ -513,6 +631,13 @@ function App() {
   const stopSession = useCallback(() => {
     addLog('Stopping session...', 'info');
     
+    // Cleanup Sarvam recorder
+    if (sarvamRecorderRef.current) {
+      try { sarvamRecorderRef.current.stop(); } catch(e) {}
+      sarvamRecorderRef.current = null;
+    }
+    setIsRecordingForSarvam(false);
+    
     // Cleanup AudioWorklet node
     if (workletNodeRef.current) {
       workletNodeRef.current.disconnect();
@@ -565,6 +690,7 @@ function App() {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      if (sarvamRecorderRef.current) try { sarvamRecorderRef.current.stop(); } catch(e) {}
       if (workletNodeRef.current) workletNodeRef.current.disconnect();
       if (processorRef.current) processorRef.current.disconnect();
       if (wsRef.current) wsRef.current.close();
@@ -614,13 +740,45 @@ function App() {
               ))}
             </div>
           )}
+          
+          {/* Sarvam Recording Controls */}
+          {isConnected && (
+            <div className="sarvam-controls">
+              {!isRecordingForSarvam ? (
+                <button 
+                  className="sarvam-btn start"
+                  onClick={startSarvamFullRecording}
+                  disabled={isSarvamProcessing}
+                >
+                  🎤 Start Sarvam Recording
+                </button>
+              ) : (
+                <button 
+                  className="sarvam-btn stop"
+                  onClick={stopAndTranscribeWithSarvam}
+                  disabled={isSarvamProcessing}
+                >
+                  ⏹️ Stop & Transcribe with Sarvam
+                </button>
+              )}
+              {isRecordingForSarvam && (
+                <span className="recording-indicator">● Recording for Sarvam...</span>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="transcript-section">
           {transcript && (
             <div className="transcript-box user">
-              <span className="label">You:</span>
+              <span className="label">You (GPT Realtime):</span>
               <p>{transcript}</p>
+            </div>
+          )}
+          {(sarvamTranscript || isSarvamProcessing) && (
+            <div className="transcript-box sarvam">
+              <span className="label">You (Sarvam Sarika 2.5):</span>
+              <p>{isSarvamProcessing ? '(Transcribing...)' : sarvamTranscript}</p>
             </div>
           )}
           {aiResponse && (

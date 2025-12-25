@@ -37,6 +37,10 @@ AZURE_RESOURCE = os.getenv('AZURE_RESOURCE', 'abhis-mi8y4vxk-eastus2')
 AZURE_API_KEY = os.getenv('AZURE_OPEN_API_KEY')
 DEPLOYMENT_NAME = os.getenv('DEPLOYMENT_NAME', 'gpt-realtime')
 
+# Sarvam AI Configuration
+SARVAM_API_KEY = os.getenv('SARVAM_API_KEY')
+SARVAM_API_URL = "https://api.sarvam.ai/speech-to-text"
+
 # WebSocket URLs
 AZURE_ENDPOINT = f"https://{AZURE_RESOURCE}.cognitiveservices.azure.com"
 WS_URL = f"wss://{AZURE_RESOURCE}.cognitiveservices.azure.com/openai/v1/realtime?model={DEPLOYMENT_NAME}"
@@ -268,6 +272,131 @@ def health():
     return jsonify({"status": "healthy"})
 
 
+@app.route('/api/sarvam/test', methods=['GET'])
+def test_sarvam():
+    """Test Sarvam API connectivity"""
+    import requests
+    
+    if not SARVAM_API_KEY:
+        return jsonify({"error": "SARVAM_API_KEY not configured", "success": False})
+    
+    # Just check if we can reach the API
+    headers = {"api-subscription-key": SARVAM_API_KEY}
+    
+    try:
+        # Try to access the API (will fail without audio but shows connectivity)
+        response = requests.post(
+            SARVAM_API_URL,
+            headers=headers,
+            data={"model": "saarika:v2", "language_code": "hi-IN"},
+            timeout=10
+        )
+        return jsonify({
+            "status_code": response.status_code,
+            "response": response.text[:500] if response.text else "Empty response",
+            "api_key_set": True,
+            "endpoint": SARVAM_API_URL
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "success": False})
+
+
+@app.route('/api/sarvam/transcribe', methods=['POST'])
+def sarvam_transcribe():
+    """
+    Transcribe audio using Sarvam AI Saarika 2.5 model.
+    Accepts webm audio from MediaRecorder or PCM audio.
+    """
+    import requests
+    import base64
+    import io
+    
+    try:
+        if not SARVAM_API_KEY:
+            return jsonify({"error": "SARVAM_API_KEY not configured"}), 500
+        
+        data = request.get_json()
+        if not data or 'audio' not in data:
+            return jsonify({"error": "No audio data provided"}), 400
+        
+        # Decode base64 audio
+        audio_base64 = data['audio']
+        audio_bytes = base64.b64decode(audio_base64)
+        
+        # Get format from request (webm from MediaRecorder, or pcm)
+        audio_format = data.get('format', 'webm')
+        
+        # Get language from request or use auto-detect
+        language_code = data.get('language_code', 'auto')
+        # Map 'auto' to 'unknown' for Sarvam API
+        if language_code == 'auto':
+            language_code = 'unknown'
+        
+        # Try sending webm directly first, then fall back to wav conversion if needed
+        audio_buffer = io.BytesIO(audio_bytes)
+        
+        if audio_format == 'webm':
+            # Try webm directly first - Sarvam may support it
+            mime_type = "audio/webm"
+            filename = "audio.webm"
+            print(f"📦 Using webm directly, size={len(audio_bytes)} bytes")
+        else:
+            mime_type = "audio/wav"
+            filename = "audio.wav"
+        
+        # Call Sarvam AI API
+        headers = {
+            "api-subscription-key": SARVAM_API_KEY
+        }
+        
+        files = {
+            "file": (filename, audio_buffer, mime_type)
+        }
+        
+        form_data = {
+            "model": "saarika:v2.5",
+            "language_code": language_code
+        }
+        
+        # Ensure buffer is at the beginning before sending
+        audio_buffer.seek(0)
+        print(f"📤 Sending to Sarvam API: mime={mime_type}, language={language_code}, size={len(audio_bytes)} bytes")
+        
+        response = requests.post(
+            SARVAM_API_URL,
+            headers=headers,
+            files=files,
+            data=form_data,
+            timeout=30
+        )
+        
+        print(f"📥 Sarvam API response: {response.status_code}")
+        
+        if response.status_code == 200:
+            result = response.json()
+            print(f"📋 Sarvam full response: {result}")
+            
+            # Try different field names that Sarvam API might use
+            transcript = result.get('transcript') or result.get('text') or result.get('transcription') or ''
+            language_detected = result.get('language_code') or result.get('language') or language_code
+            
+            print(f"✅ Sarvam transcript: {transcript[:100] if transcript else '(empty)'}...")
+            return jsonify({
+                "transcript": transcript,
+                "language": language_detected,
+                "success": True
+            })
+        else:
+            error_msg = f"Sarvam API error: {response.status_code} - {response.text}"
+            print(f"❌ {error_msg}")
+            return jsonify({"error": error_msg, "success": False}), response.status_code
+            
+    except Exception as e:
+        error_msg = f"Sarvam transcription error: {str(e)}"
+        print(f"❌ {error_msg}")
+        return jsonify({"error": error_msg, "success": False}), 500
+
+
 # Serve React frontend (for production/Replit deployment)
 if HAS_FRONTEND_BUILD:
     @app.route('/')
@@ -421,16 +550,18 @@ if __name__ == '__main__':
     print(f"   Resource:    {AZURE_RESOURCE}")
     print(f"   Deployment:  {DEPLOYMENT_NAME}")
     print(f"   Azure WS:    {WS_URL}")
-    print(f"   API Key:     {'✅ Set' if AZURE_API_KEY else '❌ Not set'}")
+    print(f"   Azure Key:   {'✅ Set' if AZURE_API_KEY else '❌ Not set'}")
+    print(f"   Sarvam Key:  {'✅ Set' if SARVAM_API_KEY else '❌ Not set'}")
     print(f"   Log File:    {log_file}")
     print(f"   Frontend:    {'✅ Serving built React app' if HAS_FRONTEND_BUILD else '❌ Not found (run npm build)'}")
     print(f"   Port:        {port}")
     print("=" * 50)
     print("")
     print("📡 Endpoints:")
-    print("   GET  /api/config        - Get configuration")
-    print("   GET  /api/latency-stats - Get latency statistics")
-    print("   WS   /ws/realtime       - WebSocket proxy to Azure")
+    print("   GET  /api/config           - Get configuration")
+    print("   GET  /api/latency-stats    - Get latency statistics")
+    print("   POST /api/sarvam/transcribe - Sarvam AI transcription")
+    print("   WS   /ws/realtime          - WebSocket proxy to Azure")
     if HAS_FRONTEND_BUILD:
         print("   GET  /                  - React frontend")
     print("")

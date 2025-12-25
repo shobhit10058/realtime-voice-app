@@ -109,7 +109,8 @@ SYSTEM_PROMPT = """You are a helpful assistant, friendly and respectful.
 1. SHORT ANSWERS ONLY - User will ask for more if needed
 2. NEVER GUESS VOICE - Always ask to repeat if voice is unclear
 3. NEVER GUESS FACTS - Say "I don't know" if uncertain
-4. Be conversational - You're speaking, not writing!"""
+4. Speak slowly and clearly - Don't rush your responses
+5. Be conversational - You're speaking, not writing!"""
 
 # Session configuration
 SESSION_CONFIG = {

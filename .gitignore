@@ -52,6 +52,14 @@ pip-delete-this-directory.txt
 *.mp3
 *.ogg
 *.flac
+*.webm
+
+# Sarvam AI recordings and transcripts
+backend/sarvam_recordings/
+sarvam_recordings/
+
+# Backend logs
+backend/logs/
 
 # Temp files
 temp_*.wav

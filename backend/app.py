@@ -313,6 +313,8 @@ def sarvam_transcribe():
     import requests
     import base64
     import io
+    import subprocess
+    import tempfile
     
     # Create recordings folder if it doesn't exist
     recordings_dir = os.path.join(os.path.dirname(__file__), 'sarvam_recordings')
@@ -342,24 +344,49 @@ def sarvam_transcribe():
         # Generate timestamp for unique filenames
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
         
-        # Determine file extension
+        # Save original audio file to disk
         if audio_format == 'webm':
-            mime_type = "audio/webm"
-            filename = "audio.webm"
             saved_filename = f"audio_{timestamp}.webm"
         else:
-            mime_type = "audio/wav"
-            filename = "audio.wav"
             saved_filename = f"audio_{timestamp}.wav"
         
-        # Save audio file to disk
         audio_filepath = os.path.join(recordings_dir, saved_filename)
         with open(audio_filepath, 'wb') as f:
             f.write(audio_bytes)
-        print(f"💾 Saved audio to: {audio_filepath}")
+        print(f"💾 Saved original audio to: {audio_filepath}")
         
-        # Prepare audio buffer for API
-        audio_buffer = io.BytesIO(audio_bytes)
+        # Convert webm to wav for Sarvam API (webm not supported)
+        if audio_format == 'webm':
+            try:
+                wav_filename = f"audio_{timestamp}.wav"
+                wav_filepath = os.path.join(recordings_dir, wav_filename)
+                
+                # Run ffmpeg conversion
+                result = subprocess.run([
+                    'ffmpeg', '-y', '-i', audio_filepath,
+                    '-ar', '16000', '-ac', '1', '-f', 'wav', wav_filepath
+                ], capture_output=True, timeout=30)
+                
+                if result.returncode == 0 and os.path.exists(wav_filepath):
+                    with open(wav_filepath, 'rb') as f:
+                        audio_buffer = io.BytesIO(f.read())
+                    mime_type = "audio/wav"
+                    filename = "audio.wav"
+                    print(f"✅ Converted to WAV: {wav_filepath}, size={audio_buffer.getbuffer().nbytes} bytes")
+                else:
+                    print(f"⚠️ ffmpeg conversion failed: {result.stderr.decode()}")
+                    audio_buffer = io.BytesIO(audio_bytes)
+                    mime_type = "audio/webm"
+                    filename = "audio.webm"
+            except Exception as e:
+                print(f"⚠️ ffmpeg error: {e}, using webm directly")
+                audio_buffer = io.BytesIO(audio_bytes)
+                mime_type = "audio/webm"
+                filename = "audio.webm"
+        else:
+            audio_buffer = io.BytesIO(audio_bytes)
+            mime_type = "audio/wav"
+            filename = "audio.wav"
         
         # Call Sarvam AI API
         headers = {

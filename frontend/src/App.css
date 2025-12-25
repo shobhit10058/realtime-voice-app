@@ -173,6 +173,35 @@
   color: #f59e0b;
 }
 
+/* Conversation History */
+.conversation-history {
+  margin-bottom: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px dashed var(--border);
+}
+
+.history-header {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 0.75rem;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.transcript-box.history {
+  opacity: 0.7;
+  padding: 0.75rem 1rem;
+}
+
+.transcript-box.history p {
+  font-size: 0.9rem;
+}
+
+.transcript-box.current {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.1);
+}
+
 /* Sarvam Recording Controls */
 .sarvam-controls {
   display: flex;

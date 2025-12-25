@@ -11,6 +11,7 @@ function App() {
   const [status, setStatus] = useState('Click to start voice chat');
   const [transcript, setTranscript] = useState('');
   const [aiResponse, setAiResponse] = useState('');
+  const [conversationHistory, setConversationHistory] = useState([]);  // Persist all exchanges
   const [logs, setLogs] = useState([]);
   const [sarvamTranscript, setSarvamTranscript] = useState('');
   const [isSarvamProcessing, setIsSarvamProcessing] = useState(false);
@@ -29,6 +30,10 @@ function App() {
   // Sarvam AI - separate MediaRecorder for independent audio capture
   const sarvamRecorderRef = useRef(null);
   const sarvamChunksRef = useRef([]);
+  
+  // Refs to track last completed exchange for history saving
+  const lastCompletedTranscriptRef = useRef('');
+  const lastCompletedAiResponseRef = useRef('');
 
   const addLog = useCallback((message, type = 'info') => {
     const timestamp = new Date().toLocaleTimeString();
@@ -440,10 +445,28 @@ function App() {
           if (isStreamingRef.current) {
             addLog('User interrupted - stopping AI', 'warning');
             stopAllAudio();
-            
-            // Just stop local audio - don't send response.cancel as it may interfere
-            // with the new speech being processed
-            // The server will handle the transition automatically
+          }
+          // Save previous completed exchange to history
+          if (lastCompletedTranscriptRef.current || lastCompletedAiResponseRef.current) {
+            const newEntries = [];
+            if (lastCompletedTranscriptRef.current) {
+              newEntries.push({
+                type: 'user',
+                text: lastCompletedTranscriptRef.current,
+                timestamp: new Date().toLocaleTimeString()
+              });
+            }
+            if (lastCompletedAiResponseRef.current) {
+              newEntries.push({
+                type: 'ai',
+                text: lastCompletedAiResponseRef.current,
+                timestamp: new Date().toLocaleTimeString()
+              });
+            }
+            setConversationHistory(prev => [...prev, ...newEntries]);
+            // Clear refs after saving
+            lastCompletedTranscriptRef.current = '';
+            lastCompletedAiResponseRef.current = '';
           }
           addLog('Speech detected...', 'info');
           setTranscript('(Listening...)');
@@ -458,6 +481,7 @@ function App() {
         case 'conversation.item.input_audio_transcription.completed':
           if (data.transcript) {
             setTranscript(data.transcript);
+            lastCompletedTranscriptRef.current = data.transcript;
             addLog(`You: ${data.transcript}`, 'info');
           }
           break;
@@ -478,6 +502,7 @@ function App() {
         case 'response.output_audio_transcript.done':
           if (data.transcript) {
             setAiResponse(data.transcript);
+            lastCompletedAiResponseRef.current = data.transcript;
             addLog(`AI: ${data.transcript.substring(0, 50)}...`, 'success');
           }
           break;
@@ -703,6 +728,11 @@ function App() {
     setIsListening(false);
     setIsSpeaking(false);
     setStatus('Session ended. Click to restart.');
+    // Reset all transcripts on disconnect
+    setTranscript('');
+    setAiResponse('');
+    setConversationHistory([]);
+    setSarvamTranscript('');
     addLog('Session stopped', 'success');
   }, [addLog]);
 
@@ -796,8 +826,22 @@ function App() {
         </div>
 
         <div className="transcript-section">
+          {/* Conversation History */}
+          {conversationHistory.length > 0 && (
+            <div className="conversation-history">
+              <div className="history-header">Conversation History</div>
+              {conversationHistory.map((entry, index) => (
+                <div key={index} className={`transcript-box ${entry.type} history`}>
+                  <span className="label">{entry.type === 'user' ? 'You:' : 'AI:'}</span>
+                  <p>{entry.text}</p>
+                </div>
+              ))}
+            </div>
+          )}
+          
+          {/* Current Exchange */}
           {transcript && (
-            <div className="transcript-box user">
+            <div className="transcript-box user current">
               <span className="label">You (GPT Realtime):</span>
               <p>{transcript}</p>
             </div>
@@ -809,7 +853,7 @@ function App() {
             </div>
           )}
           {aiResponse && (
-            <div className="transcript-box ai">
+            <div className="transcript-box ai current">
               <span className="label">AI:</span>
               <p>{aiResponse}</p>
             </div>

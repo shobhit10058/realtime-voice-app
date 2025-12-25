@@ -296,7 +296,37 @@ function App() {
     }
   }, [addLog]);
 
-  // Stop Sarvam recording and send to API
+  // Helper function to send a single chunk to Sarvam API
+  const transcribeChunk = async (base64Audio, chunkIndex, totalChunks) => {
+    try {
+      const response = await fetch('/api/sarvam/transcribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          audio: base64Audio,
+          format: 'webm',
+          language_code: 'hi-IN'
+        })
+      });
+      
+      const result = await response.json();
+      console.log(`Sarvam chunk ${chunkIndex + 1}/${totalChunks} result:`, result);
+      
+      if (result.audio_file) {
+        addLog(`Saved: ${result.audio_file}`, 'info');
+      }
+      
+      if (result.success && result.transcript) {
+        return result.transcript;
+      }
+      return '';
+    } catch (error) {
+      console.warn(`Sarvam chunk ${chunkIndex + 1} error:`, error);
+      return '';
+    }
+  };
+
+  // Stop Sarvam recording and send to API (with chunking for long audio)
   const stopAndTranscribeWithSarvam = useCallback(async () => {
     if (!sarvamRecorderRef.current) {
       addLog('No recording to transcribe', 'warning');
@@ -320,61 +350,58 @@ function App() {
         }
         
         try {
-          // Combine chunks into a blob
-          const audioBlob = new Blob(sarvamChunksRef.current, { type: 'audio/webm' });
-          const audioSize = audioBlob.size;
+          // Each chunk from MediaRecorder is ~1 second
+          // Sarvam limit is 30 seconds, so we'll send in batches of ~25 chunks (25 seconds) to be safe
+          const CHUNKS_PER_BATCH = 25;
+          const allChunks = [...sarvamChunksRef.current];
           sarvamChunksRef.current = [];
           
-          addLog(`Sending ${(audioSize / 1024).toFixed(1)} KB to Sarvam...`, 'info');
+          const totalBatches = Math.ceil(allChunks.length / CHUNKS_PER_BATCH);
+          addLog(`Processing ${allChunks.length} seconds of audio in ${totalBatches} batch(es)...`, 'info');
           
-          // Convert blob to base64
-          const reader = new FileReader();
-          reader.onloadend = async () => {
-            const base64Audio = reader.result.split(',')[1];
+          let fullTranscript = '';
+          
+          for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+            const startIdx = batchIndex * CHUNKS_PER_BATCH;
+            const endIdx = Math.min(startIdx + CHUNKS_PER_BATCH, allChunks.length);
+            const batchChunks = allChunks.slice(startIdx, endIdx);
             
-            try {
-              const response = await fetch('/api/sarvam/transcribe', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  audio: base64Audio,
-                  format: 'webm',
-                  language_code: 'hi-IN'
-                })
-              });
-              
-              const result = await response.json();
-              console.log('Sarvam API result:', result);
-              
-              if (result.success) {
-                const transcript = result.transcript || '(No speech detected in audio)';
-                setSarvamTranscript(transcript);
-                if (result.transcript) {
-                  addLog(`Sarvam transcription complete!`, 'success');
-                } else {
-                  addLog('Sarvam: No speech detected', 'warning');
-                }
-              } else if (result.error) {
-                setSarvamTranscript(`Error: ${result.error}`);
-                addLog(`Sarvam error: ${result.error.substring(0, 50)}`, 'error');
-              } else {
-                setSarvamTranscript('(No response from Sarvam)');
-              }
-            } catch (error) {
-              setSarvamTranscript(`API error: ${error.message}`);
-              addLog(`Sarvam API error: ${error.message}`, 'error');
-            } finally {
-              setIsSarvamProcessing(false);
+            // Combine batch chunks into a blob
+            const audioBlob = new Blob(batchChunks, { type: 'audio/webm' });
+            
+            addLog(`Sending batch ${batchIndex + 1}/${totalBatches} (${(audioBlob.size / 1024).toFixed(1)} KB)...`, 'info');
+            
+            // Convert to base64
+            const base64Audio = await new Promise((res) => {
+              const reader = new FileReader();
+              reader.onloadend = () => res(reader.result.split(',')[1]);
+              reader.readAsDataURL(audioBlob);
+            });
+            
+            // Transcribe this batch
+            const batchTranscript = await transcribeChunk(base64Audio, batchIndex, totalBatches);
+            if (batchTranscript) {
+              fullTranscript += (fullTranscript ? ' ' : '') + batchTranscript;
+              // Update transcript progressively
+              setSarvamTranscript(fullTranscript);
             }
-            resolve();
-          };
-          reader.readAsDataURL(audioBlob);
+          }
+          
+          if (fullTranscript) {
+            addLog('Sarvam transcription complete!', 'success');
+          } else {
+            setSarvamTranscript('(No speech detected in audio)');
+            addLog('Sarvam: No speech detected', 'warning');
+          }
+          
         } catch (error) {
           console.warn('Sarvam processing error:', error);
           setSarvamTranscript(`Processing error: ${error.message}`);
+          addLog(`Sarvam error: ${error.message}`, 'error');
+        } finally {
           setIsSarvamProcessing(false);
-          resolve();
         }
+        resolve();
       };
       
       recorder.stop();

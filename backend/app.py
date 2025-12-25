@@ -306,10 +306,15 @@ def sarvam_transcribe():
     """
     Transcribe audio using Sarvam AI Saarika 2.5 model.
     Accepts webm audio from MediaRecorder or PCM audio.
+    Saves audio files and transcripts to sarvam_recordings folder.
     """
     import requests
     import base64
     import io
+    
+    # Create recordings folder if it doesn't exist
+    recordings_dir = os.path.join(os.path.dirname(__file__), 'sarvam_recordings')
+    os.makedirs(recordings_dir, exist_ok=True)
     
     try:
         if not SARVAM_API_KEY:
@@ -332,17 +337,27 @@ def sarvam_transcribe():
         if language_code == 'auto':
             language_code = 'unknown'
         
-        # Try sending webm directly first, then fall back to wav conversion if needed
-        audio_buffer = io.BytesIO(audio_bytes)
+        # Generate timestamp for unique filenames
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
         
+        # Determine file extension
         if audio_format == 'webm':
-            # Try webm directly first - Sarvam may support it
             mime_type = "audio/webm"
             filename = "audio.webm"
-            print(f"📦 Using webm directly, size={len(audio_bytes)} bytes")
+            saved_filename = f"audio_{timestamp}.webm"
         else:
             mime_type = "audio/wav"
             filename = "audio.wav"
+            saved_filename = f"audio_{timestamp}.wav"
+        
+        # Save audio file to disk
+        audio_filepath = os.path.join(recordings_dir, saved_filename)
+        with open(audio_filepath, 'wb') as f:
+            f.write(audio_bytes)
+        print(f"💾 Saved audio to: {audio_filepath}")
+        
+        # Prepare audio buffer for API
+        audio_buffer = io.BytesIO(audio_bytes)
         
         # Call Sarvam AI API
         headers = {
@@ -372,6 +387,10 @@ def sarvam_transcribe():
         
         print(f"📥 Sarvam API response: {response.status_code}")
         
+        transcript = ''
+        language_detected = language_code
+        error_msg = None
+        
         if response.status_code == 200:
             result = response.json()
             print(f"📋 Sarvam full response: {result}")
@@ -381,14 +400,37 @@ def sarvam_transcribe():
             language_detected = result.get('language_code') or result.get('language') or language_code
             
             print(f"✅ Sarvam transcript: {transcript[:100] if transcript else '(empty)'}...")
-            return jsonify({
-                "transcript": transcript,
-                "language": language_detected,
-                "success": True
-            })
         else:
             error_msg = f"Sarvam API error: {response.status_code} - {response.text}"
             print(f"❌ {error_msg}")
+        
+        # Save transcript to file (same name as audio but .txt)
+        transcript_filename = saved_filename.rsplit('.', 1)[0] + '_transcript.txt'
+        transcript_filepath = os.path.join(recordings_dir, transcript_filename)
+        with open(transcript_filepath, 'w', encoding='utf-8') as f:
+            f.write(f"Audio File: {saved_filename}\n")
+            f.write(f"Timestamp: {timestamp}\n")
+            f.write(f"Language: {language_detected}\n")
+            f.write(f"Audio Size: {len(audio_bytes)} bytes\n")
+            f.write(f"API Status: {response.status_code}\n")
+            f.write("-" * 50 + "\n")
+            if transcript:
+                f.write(f"Transcript:\n{transcript}\n")
+            elif error_msg:
+                f.write(f"Error:\n{error_msg}\n")
+            else:
+                f.write("Transcript: (empty - no speech detected)\n")
+        print(f"📝 Saved transcript to: {transcript_filepath}")
+        
+        if response.status_code == 200:
+            return jsonify({
+                "transcript": transcript,
+                "language": language_detected,
+                "success": True,
+                "audio_file": saved_filename,
+                "transcript_file": transcript_filename
+            })
+        else:
             return jsonify({"error": error_msg, "success": False}), response.status_code
             
     except Exception as e:

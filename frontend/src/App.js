@@ -73,9 +73,9 @@ function App() {
       this.isPlaying = false;
       this.onPlayingChange = options.onPlayingChange || (() => {});
       
-      // Buffering settings for smooth playback
-      this.minBufferSize = Math.floor(this.sampleRate * 0.08); // 80ms minimum buffer before playing
-      this.maxBufferSize = Math.floor(this.sampleRate * 0.3);  // 300ms max buffer before forcing flush
+      // Buffering settings for smooth playback - tuned to prevent audio breaking at start
+      this.minBufferSize = Math.floor(this.sampleRate * 0.15); // 150ms minimum buffer before playing (was 80ms)
+      this.maxBufferSize = Math.floor(this.sampleRate * 0.5);  // 500ms max buffer before forcing flush (was 300ms)
       this.isBuffering = true; // Start in buffering mode
       this.scheduledBuffers = [];
       this.endCheckTimer = null;
@@ -114,8 +114,8 @@ function App() {
         }
       } else {
         // Streaming mode - flush when we have enough for smooth playback
-        // Use smaller chunks for lower latency
-        const chunkSize = Math.floor(this.sampleRate * 0.1); // 100ms chunks
+        // Use slightly larger chunks for smoother audio (less gaps)
+        const chunkSize = Math.floor(this.sampleRate * 0.12); // 120ms chunks (was 100ms)
         if (this.samples.length >= chunkSize) {
           this.flush();
         }
@@ -139,10 +139,10 @@ function App() {
       
       // Schedule playback - ensure continuous audio without gaps
       const currentTime = this.audioCtx.currentTime;
-      const scheduleAhead = 0.02; // 20ms lookahead for scheduling
+      const scheduleAhead = 0.05; // 50ms lookahead for scheduling (was 20ms) - smoother start
       
       if (this.scheduledTime < currentTime + scheduleAhead) {
-        // We're behind or just starting - schedule immediately with small delay
+        // We're behind or just starting - schedule with enough buffer to prevent glitches
         this.scheduledTime = currentTime + scheduleAhead;
       }
       

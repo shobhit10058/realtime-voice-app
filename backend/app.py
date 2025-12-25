@@ -113,15 +113,16 @@ SYSTEM_PROMPT = """You are a helpful assistant, friendly and respectful.
 5. Be conversational - You're speaking, not writing!"""
 
 # Session configuration
+# VAD settings tuned to prevent false speech detections at start
 SESSION_CONFIG = {
     "instructions": SYSTEM_PROMPT,
     "output_modalities": ["audio"],
     "voice": "alloy",  # Options: alloy, echo, shimmer
     "turn_detection": {
         "type": "server_vad",
-        "threshold": 0.5,
-        "prefix_padding_ms": 300,
-        "silence_duration_ms": 500,
+        "threshold": 0.7,           # Increased from 0.5 - less sensitive to avoid false triggers
+        "prefix_padding_ms": 500,   # Increased from 300 - more audio context before speech
+        "silence_duration_ms": 700, # Increased from 500 - wait longer before considering speech ended
         "create_response": True,
     }
 }

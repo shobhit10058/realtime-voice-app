@@ -42,6 +42,132 @@
   font-weight: 300;
 }
 
+/* Bot Selector */
+.bot-selector {
+  padding: 0 2rem 1rem;
+}
+
+.bot-selector-title {
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  margin-bottom: 1rem;
+  text-align: center;
+  font-weight: 500;
+}
+
+.bot-cards {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.bot-card {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  background: var(--bg-tertiary);
+  border: 2px solid var(--border);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  min-width: 200px;
+  max-width: 280px;
+  position: relative;
+}
+
+.bot-card:hover {
+  border-color: var(--text-muted);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
+}
+
+.bot-card.selected {
+  border-color: var(--accent-primary);
+  background: linear-gradient(135deg, var(--bg-tertiary) 0%, rgba(99, 102, 241, 0.1) 100%);
+  box-shadow: 0 0 20px var(--accent-glow);
+}
+
+.bot-card-icon {
+  font-size: 2rem;
+  flex-shrink: 0;
+}
+
+.bot-card-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.bot-card-name {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 0.25rem 0;
+}
+
+.bot-card-description {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  margin: 0;
+  line-height: 1.4;
+}
+
+.bot-card-check {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  width: 24px;
+  height: 24px;
+  background: var(--accent-primary);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-size: 0.75rem;
+  font-weight: bold;
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.5);
+}
+
+/* Current Bot Badge */
+.current-bot-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  margin: 0 2rem 1rem;
+  background: linear-gradient(135deg, var(--bg-tertiary) 0%, rgba(99, 102, 241, 0.1) 100%);
+  border: 1px solid var(--accent-primary);
+  border-radius: 20px;
+  font-size: 0.9rem;
+}
+
+.badge-icon {
+  font-size: 1.2rem;
+}
+
+.badge-text {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+/* Disabled state for mic button */
+.mic-button.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.mic-button.disabled:hover {
+  transform: none;
+  box-shadow: 
+    0 10px 40px rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
 .voice-interface {
   display: flex;
   flex-direction: column;
@@ -411,6 +537,20 @@
 
   .transcript-section {
     padding: 0 1.5rem 1.5rem;
+  }
+
+  .bot-selector {
+    padding: 0 1.5rem 1rem;
+  }
+
+  .bot-cards {
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .bot-card {
+    min-width: 100%;
+    max-width: 100%;
   }
 }
 

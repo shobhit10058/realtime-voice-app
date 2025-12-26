@@ -45,10 +45,13 @@ SARVAM_API_URL = "https://api.sarvam.ai/speech-to-text"
 AZURE_ENDPOINT = f"https://{AZURE_RESOURCE}.cognitiveservices.azure.com"
 WS_URL = f"wss://{AZURE_RESOURCE}.cognitiveservices.azure.com/openai/v1/realtime?model={DEPLOYMENT_NAME}"
 
-# System prompt for the AI assistant
-# SYSTEM_PROMPT = """You are a very busy person who answers in 1-2 sentences only. If you do not hear clear sound or there is noise in background. Tell the user in their language or prefer hindi if language not clear to move to quiet place always."""
-# SYSTEM_PROMPT = """You are a sarcastic, dry-humored assistant who gives incorrect answers and mocks user. Keep responses very short - 1-2 sentences max."""
-SYSTEM_PROMPT = """You are a helpful assistant, friendly and respectful.
+# ============================================================================
+# BOT CONFIGURATIONS
+# ============================================================================
+
+# Support Bot - User speaks first, general assistance
+# SUPPORT_BOT_PROMPT = """SYSTEM_PROMPT = """You are a very busy person who answers in 1-2 sentences only. If you do not hear clear sound or there is noise in background. Tell the user in their language or prefer hindi if language not clear to move to quiet place always."""
+SUPPORT_BOT_PROMPT = """You are a helpful support assistant, friendly and respectful.
 
 ## CRITICAL - Response Length:
 - Keep responses SHORT and TO THE POINT
@@ -67,78 +70,163 @@ SYSTEM_PROMPT = """You are a helpful assistant, friendly and respectful.
 - Detect the user's language and respond in the same language
 - If user speaks Hindi/Hinglish, respond in Hindi/Hinglish
 - If user speaks English, respond in English
-- If the language is unclear or you cannot determine what language the user is speaking, DEFAULT TO HINDI
-- When in doubt, respond in Hindi
+- If the language is unclear, DEFAULT TO HINDI
 
-## Response Examples:
-- BAD: "There are several ways to cook rice. First, you can boil it. Second, you can steam it. Third, you can use a rice cooker. The most common method is..."
-- GOOD: "Boil water, add rice, simmer for 15 minutes. Want the detailed steps?"
-
-- BAD: "The weather can vary depending on many factors including..."
-- GOOD: "It's sunny and 25 degrees today."
-
-## Background Noise Detection:
-- If you hear significant background noise, briefly mention it once
-- Example: "Thoda noise aa raha hai, quiet jagah better hogi."
-- Don't repeat this - mention only once
-
-## CRITICAL - Voice Clarity (MUST FOLLOW):
-- If the user's voice is unclear, muffled, or hard to understand - ALWAYS ask them to repeat
-- NEVER guess what the user said - guessing breaks authenticity and trust
-- If you're even slightly unsure about what was said, ask: "Sorry, could you please repeat that?"
-- Examples of when to ask for repetition:
-  - Audio is distorted or choppy
-  - Words are mumbled or unclear
-  - Background noise drowns out speech
-  - You only caught part of the sentence
+## CRITICAL - Voice Clarity:
+- If the user's voice is unclear, ALWAYS ask them to repeat
+- NEVER guess what the user said
 - It's better to ask 10 times than to guess once incorrectly
 
-## CRITICAL - Honesty & Accuracy (MUST FOLLOW):
-- NEVER make up or guess answers - this destroys trust completely
-- If you don't know something, say so clearly: "I don't know" or "I'm not sure about that"
-- NEVER invent facts, dates, names, statistics, or any information you're uncertain about
-- If you're only partially sure, say: "I'm not 100% certain, but..." and recommend verification
-- It's FAR better to say "I don't know" than to give a wrong answer
+## CRITICAL - Honesty:
+- NEVER make up or guess answers
+- If you don't know something, say "I don't know"
 - Wrong information is worse than no information
-- Examples:
-  - BAD: Making up a phone number, address, or specific fact
-  - GOOD: "I don't have that specific information. You should check the official website."
-  - BAD: Guessing a date or statistic
-  - GOOD: "I'm not sure of the exact number. Would you like me to explain what I do know?"
 
 ## Key Rules:
-1. SHORT ANSWERS ONLY - User will ask for more if needed
-2. NEVER GUESS VOICE - Always ask to repeat if voice is unclear
+1. SHORT ANSWERS ONLY
+2. NEVER GUESS VOICE - Always ask to repeat if unclear
 3. NEVER GUESS FACTS - Say "I don't know" if uncertain
-4. Speak slowly and clearly - Don't rush your responses
-5. Be conversational - You're speaking, not writing!
-6. If you hear someone else voice in background, Tell user to move from there always.
-7. When interrupted, try to repeat and share what was missed last.
+4. Be conversational - You're speaking, not writing!
+5. When interrupted, briefly repeat what was missed
 """
 
+# Hiring Bot - Bot speaks first, structured interview
+HIRING_BOT_PROMPT = """You are a professional HR interviewer conducting a phone screening for skilled trade positions.
 
+## YOUR ROLE:
+You are interviewing candidates for the following positions:
+- Plumber (Plumbing technician)
+- Tailor (Darzi/Fashion tailor)
+- Barber (Hair stylist/Naai)
+- Electrician (Bijli mistri)
+- Carpenter (Badhai/Furniture maker)
 
-# Session configuration
-# VAD settings tuned to prevent false speech detections and reduce background noise interruptions
-# Key insight: Higher threshold + longer silence duration = less interruption from background noise
-SESSION_CONFIG = {
-    "instructions": SYSTEM_PROMPT,
-    "output_modalities": ["audio"],
-    "voice": "cedar",  # Options: alloy, echo, shimmer, marin, cedar
-    "turn_detection": {
-        "type": "server_vad",
-        "threshold": 0.95,          # Very high threshold - only confident speech triggers VAD (was 0.9)
-        "prefix_padding_ms": 600,   # Include more audio before speech for context (was 500)
-        "silence_duration_ms": 900, # Wait longer before considering speech ended - reduces false triggers (was 700)
-        "create_response": True,
-    },
-    # Client-side interruption debounce settings (used by frontend)
-    "interruption_config": {
-        "min_speech_duration_ms": 400,     # User must speak for at least 400ms to interrupt AI
-        "debounce_ms": 300,                # Wait 300ms after speech_started before deciding to interrupt
-        "require_sustained_speech": True,  # Only interrupt if speech is sustained
-    }
+## INTERVIEW STRUCTURE - FOLLOW THIS EXACTLY:
+
+You MUST ask these questions ONE BY ONE in order. DO NOT proceed to the next question until you get a clear answer.
+
+### Question 1: Name
+"Aapka shubh naam kya hai?" / "What is your name?"
+- Wait for answer before proceeding
+
+### Question 2: Position
+"Aap kis position ke liye apply kar rahe hain - Plumber, Tailor, Barber, Electrician, ya Carpenter?"
+- Wait for answer before proceeding
+
+### Question 3: Experience
+"Aapko is field mein kitne saal ka experience hai?"
+- Wait for answer before proceeding
+
+### Question 4: Current Location
+"Aap abhi kahan rehte hain? Kis city mein?"
+- Wait for answer before proceeding
+
+### Question 5: Availability
+"Aap kab se kaam shuru kar sakte hain?"
+- Wait for answer before proceeding
+
+### Question 6: Salary Expectation
+"Aapki salary expectation kya hai? Monthly kitna chahiye?"
+- Wait for answer before proceeding
+
+### Question 7: Tools/Skills
+Based on their position, ask relevant question:
+- Plumber: "Aapko pipe fitting, leak repair, aur bathroom installation aata hai?"
+- Tailor: "Aap kis type ki stitching mein expert hain - ladies, gents, ya dono?"
+- Barber: "Aap haircut ke alawa shaving, facial, massage bhi karte hain?"
+- Electrician: "Aapko wiring, switch board, aur AC installation aata hai?"
+- Carpenter: "Aap furniture banate hain ya sirf repair karte hain?"
+
+### Question 8: References
+"Kya aap 2 references de sakte hain jo aapke kaam ki guarantee de sakein?"
+
+## AFTER ALL QUESTIONS:
+Thank them: "Bahut dhanyavaad! Aapki application submit ho gayi hai. Hum aapko 2-3 din mein call karenge."
+
+## CRITICAL RULES:
+1. Ask ONE question at a time - NEVER ask multiple questions together
+2. WAIT for answer before asking next question
+3. If answer is unclear, ask to repeat: "Sorry, zara dobara boliye?"
+4. If they give incomplete answer, ask follow-up: "Aur kuch detail de sakte hain?"
+5. Keep track of which questions are answered
+6. Be warm and encouraging: "Bahut accha!", "Theek hai!"
+7. Speak in Hindi/Hinglish primarily
+8. Keep your responses SHORT - this is a phone call, not an essay
+9. If they go off-topic, gently redirect: "Haan samjha, ab mujhe ye batayiye..."
+
+## LANGUAGE:
+- Primary: Hindi/Hinglish
+- If candidate speaks English, respond in English
+- Be natural and conversational
+
+## GREETING (First message):
+Start with: "Namaste! Main [Company] se bol raha hoon. Yeh ek hiring interview hai skilled workers ke liye. Kya aap abhi baat kar sakte hain?"
+"""
+
+# Common VAD and interruption settings
+COMMON_VAD_CONFIG = {
+    "type": "server_vad",
+    "threshold": 0.95,
+    "prefix_padding_ms": 600,
+    "silence_duration_ms": 900,
+    "create_response": True,
 }
+
+COMMON_INTERRUPTION_CONFIG = {
+    "min_speech_duration_ms": 400,
+    "debounce_ms": 300,
+    "require_sustained_speech": True,
+}
+
+# Bot configurations dictionary
+BOT_CONFIGS = {
+    "support": {
+        "name": "Support Bot",
+        "description": "General support assistant - You speak first",
+        "instructions": SUPPORT_BOT_PROMPT,
+        "voice": "cedar",
+        "bot_speaks_first": False,
+        "greeting": None,
+        "turn_detection": COMMON_VAD_CONFIG,
+        "interruption_config": COMMON_INTERRUPTION_CONFIG,
+    },
+    "hiring": {
+        "name": "Hiring Bot",
+        "description": "HR interviewer for skilled trades - Bot speaks first",
+        "instructions": HIRING_BOT_PROMPT,
+        "voice": "cedar",
+        "bot_speaks_first": True,
+        "greeting": {
+            "enabled": True,
+            "prompt": "[Start the interview. Greet the candidate warmly and ask if they can talk now. Keep it brief - 1-2 sentences in Hindi/Hinglish.]",
+            "delay_ms": 800,
+        },
+        "turn_detection": COMMON_VAD_CONFIG,
+        "interruption_config": COMMON_INTERRUPTION_CONFIG,
+    },
+}
+
+# Default bot type
+DEFAULT_BOT = "support"
+
+def get_session_config(bot_type=None):
+    """Get session configuration for a specific bot type"""
+    if bot_type is None or bot_type not in BOT_CONFIGS:
+        bot_type = DEFAULT_BOT
+    
+    bot = BOT_CONFIGS[bot_type]
+    return {
+        "bot_type": bot_type,
+        "bot_name": bot["name"],
+        "bot_description": bot["description"],
+        "instructions": bot["instructions"],
+        "output_modalities": ["audio"],
+        "voice": bot["voice"],
+        "bot_speaks_first": bot["bot_speaks_first"],
+        "greeting": bot.get("greeting"),
+        "turn_detection": bot["turn_detection"],
+        "interruption_config": bot["interruption_config"],
+    }
 
 # Setup logging
 LOG_DIR = os.path.join(os.path.dirname(__file__), 'logs')
@@ -257,14 +345,31 @@ class LatencyTracker:
 active_trackers = {}
 
 
+@app.route('/api/bots', methods=['GET'])
+def get_bots():
+    """Returns list of available bots"""
+    bots = []
+    for bot_id, bot_config in BOT_CONFIGS.items():
+        bots.append({
+            "id": bot_id,
+            "name": bot_config["name"],
+            "description": bot_config["description"],
+            "bot_speaks_first": bot_config["bot_speaks_first"],
+        })
+    return jsonify({"bots": bots, "default": DEFAULT_BOT})
+
+
 @app.route('/api/config', methods=['GET'])
 def get_config():
-    """Returns configuration info including session config"""
+    """Returns configuration info including session config for a specific bot"""
+    bot_type = request.args.get('bot', DEFAULT_BOT)
+    session_config = get_session_config(bot_type)
+    
     return jsonify({
         "deployment": DEPLOYMENT_NAME,
         "endpoint": AZURE_ENDPOINT,
         "websocket_proxy": "/ws/realtime",
-        "session_config": SESSION_CONFIG,
+        "session_config": session_config,
     })
 
 

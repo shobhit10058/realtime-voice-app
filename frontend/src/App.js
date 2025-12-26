@@ -8,7 +8,7 @@ function App() {
   const [isConnected, setIsConnected] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const [status, setStatus] = useState('Click to start voice chat');
+  const [status, setStatus] = useState('Select a bot to start');
   const [transcript, setTranscript] = useState('');
   const [aiResponse, setAiResponse] = useState('');
   const [conversationHistory, setConversationHistory] = useState([]);  // Persist all exchanges
@@ -16,6 +16,11 @@ function App() {
   const [sarvamTranscript, setSarvamTranscript] = useState('');
   const [isSarvamProcessing, setIsSarvamProcessing] = useState(false);
   const [isRecordingForSarvam, setIsRecordingForSarvam] = useState(false);
+  
+  // Bot selection state
+  const [availableBots, setAvailableBots] = useState([]);
+  const [selectedBot, setSelectedBot] = useState(null);
+  const [currentBotConfig, setCurrentBotConfig] = useState(null);
 
   const wsRef = useRef(null);
   const audioContextRef = useRef(null);
@@ -44,6 +49,30 @@ function App() {
     debounce_ms: 300,              // Wait 300ms after speech_started to decide
     require_sustained_speech: true
   });
+  
+  // Store current bot config for use in message handler
+  const currentBotConfigRef = useRef(null);
+
+  // Fetch available bots on mount
+  useEffect(() => {
+    const fetchBots = async () => {
+      try {
+        const response = await fetch('/api/bots');
+        if (response.ok) {
+          const data = await response.json();
+          setAvailableBots(data.bots);
+          // Select default bot
+          if (data.default && data.bots.length > 0) {
+            const defaultBot = data.bots.find(b => b.id === data.default) || data.bots[0];
+            setSelectedBot(defaultBot.id);
+          }
+        }
+      } catch (error) {
+        console.error('Failed to fetch bots:', error);
+      }
+    };
+    fetchBots();
+  }, []);
 
   const addLog = useCallback((message, type = 'info') => {
     const timestamp = new Date().toLocaleTimeString();
@@ -447,7 +476,12 @@ function App() {
         case 'session.updated':
           addLog('Session configured', 'success');
           setIsListening(true);
-          setStatus('Listening... Speak now!');
+          // Update status based on whether bot speaks first
+          if (currentBotConfigRef.current?.bot_speaks_first) {
+            setStatus('Bot is greeting you...');
+          } else {
+            setStatus('Listening... Speak now!');
+          }
           break;
           
         case 'input_audio_buffer.speech_started':
@@ -606,16 +640,26 @@ function App() {
 
   // Start the voice session
   const startSession = useCallback(async () => {
+    if (!selectedBot) {
+      setStatus('Please select a bot first');
+      return;
+    }
+    
     try {
       setStatus('Getting configuration...');
-      addLog('Fetching config from backend...', 'info');
+      addLog(`Fetching config for ${selectedBot} bot...`, 'info');
 
-      // Get config from backend
-      const configResponse = await fetch('/api/config');
+      // Get config from backend with selected bot type
+      const configResponse = await fetch(`/api/config?bot=${selectedBot}`);
       if (!configResponse.ok) throw new Error('Failed to get config');
       const config = await configResponse.json();
       
-      addLog(`Connecting to ${config.deployment}...`, 'info');
+      // Store bot config for later use
+      const sessionConfig = config.session_config || {};
+      setCurrentBotConfig(sessionConfig);
+      currentBotConfigRef.current = sessionConfig;
+      
+      addLog(`Connecting to ${config.deployment} as ${sessionConfig.bot_name}...`, 'info');
       setStatus('Connecting...');
 
       // Create AudioContext
@@ -660,7 +704,7 @@ function App() {
 
         // Configure session using config from backend
         // Azure OpenAI Realtime API uses a different format than OpenAI
-        const sessionConfig = config.session_config || {};
+        const sessionConfig = currentBotConfigRef.current || config.session_config || {};
         
         // Load interruption config from backend (for smart debouncing)
         if (sessionConfig.interruption_config) {
@@ -685,7 +729,37 @@ function App() {
         console.log('Sending session.update with instructions:', instructions.substring(0, 100));
         console.log('Full session.update:', JSON.stringify(sessionUpdate, null, 2));
         ws.send(JSON.stringify(sessionUpdate));
-        addLog(`Using voice: ${voice}`, 'info');
+        addLog(`Using voice: ${voice} | Bot speaks first: ${sessionConfig.bot_speaks_first ? 'Yes' : 'No'}`, 'info');
+        
+        // If bot should speak first, trigger initial greeting after a delay
+        if (sessionConfig.bot_speaks_first && sessionConfig.greeting?.enabled) {
+          const greetingDelay = sessionConfig.greeting.delay_ms || 800;
+          addLog(`Bot will greet in ${greetingDelay}ms...`, 'info');
+          
+          setTimeout(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+              // Create a hidden prompt to trigger the greeting
+              ws.send(JSON.stringify({
+                type: 'conversation.item.create',
+                item: {
+                  type: 'message',
+                  role: 'user',
+                  content: [{
+                    type: 'input_text',
+                    text: sessionConfig.greeting.prompt || '[Greet the user warmly. Keep it brief.]'
+                  }]
+                }
+              }));
+              
+              // Trigger response generation
+              ws.send(JSON.stringify({
+                type: 'response.create'
+              }));
+              
+              addLog('Triggered initial greeting from bot', 'info');
+            }
+          }, greetingDelay);
+        }
 
         // Set up audio processing using AudioWorklet (modern, non-deprecated API)
         try {
@@ -759,7 +833,7 @@ function App() {
       addLog(`Error: ${error.message}`, 'error');
       setStatus(`Error: ${error.message}`);
     }
-  }, [addLog, handleMessage]);
+  }, [addLog, handleMessage, selectedBot]);
 
   // Stop the session
   const stopSession = useCallback(() => {
@@ -814,10 +888,12 @@ function App() {
     }
     
     isStreamingRef.current = false;
+    currentBotConfigRef.current = null;
+    setCurrentBotConfig(null);
     setIsConnected(false);
     setIsListening(false);
     setIsSpeaking(false);
-    setStatus('Session ended. Click to restart.');
+    setStatus('Select a bot to start');
     // Reset all transcripts on disconnect
     setTranscript('');
     setAiResponse('');
@@ -859,10 +935,46 @@ function App() {
           <p className="subtitle">Real-time AI conversation via WebSocket</p>
         </header>
 
+        {/* Bot Selection */}
+        {!isConnected && (
+          <div className="bot-selector">
+            <h3 className="bot-selector-title">Choose Your Assistant</h3>
+            <div className="bot-cards">
+              {availableBots.map((bot) => (
+                <div
+                  key={bot.id}
+                  className={`bot-card ${selectedBot === bot.id ? 'selected' : ''}`}
+                  onClick={() => setSelectedBot(bot.id)}
+                >
+                  <div className="bot-card-icon">
+                    {bot.id === 'support' ? '💬' : '👔'}
+                  </div>
+                  <div className="bot-card-content">
+                    <h4 className="bot-card-name">{bot.name}</h4>
+                    <p className="bot-card-description">{bot.description}</p>
+                  </div>
+                  {selectedBot === bot.id && (
+                    <div className="bot-card-check">✓</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        
+        {/* Current Bot Badge (when connected) */}
+        {isConnected && currentBotConfig && (
+          <div className="current-bot-badge">
+            <span className="badge-icon">{currentBotConfig.bot_type === 'support' ? '💬' : '👔'}</span>
+            <span className="badge-text">{currentBotConfig.bot_name}</span>
+          </div>
+        )}
+
         <div className="voice-interface">
           <button 
-            className={`mic-button ${isConnected ? 'active' : ''} ${isListening ? 'listening' : ''} ${isSpeaking ? 'speaking' : ''}`}
+            className={`mic-button ${isConnected ? 'active' : ''} ${isListening ? 'listening' : ''} ${isSpeaking ? 'speaking' : ''} ${!selectedBot ? 'disabled' : ''}`}
             onClick={toggleSession}
+            disabled={!selectedBot && !isConnected}
           >
             <div className="mic-icon">
               {isConnected ? (

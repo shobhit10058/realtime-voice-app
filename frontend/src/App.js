@@ -34,6 +34,16 @@ function App() {
   // Refs to track last completed exchange for history saving
   const lastCompletedTranscriptRef = useRef('');
   const lastCompletedAiResponseRef = useRef('');
+  
+  // Interruption debounce refs - prevent false interruptions from background noise
+  const speechStartedAtRef = useRef(null);           // Timestamp when speech was detected
+  const interruptionDebounceRef = useRef(null);      // Debounce timer for interruption
+  const pendingInterruptionRef = useRef(false);      // Whether we're waiting to confirm interruption
+  const interruptionConfigRef = useRef({
+    min_speech_duration_ms: 400,   // User must speak for at least 400ms to interrupt
+    debounce_ms: 300,              // Wait 300ms after speech_started to decide
+    require_sustained_speech: true
+  });
 
   const addLog = useCallback((message, type = 'info') => {
     const timestamp = new Date().toLocaleTimeString();
@@ -441,11 +451,42 @@ function App() {
           break;
           
         case 'input_audio_buffer.speech_started':
-          // Handle interruption - if AI is speaking, stop it immediately
+          // Record when speech started for interruption duration checking
+          speechStartedAtRef.current = Date.now();
+          
+          // Handle interruption with debouncing - don't interrupt immediately on background noise
           if (isStreamingRef.current) {
-            addLog('User interrupted - stopping AI', 'warning');
-            stopAllAudio();
+            // Set pending interruption flag
+            pendingInterruptionRef.current = true;
+            
+            // Clear any existing debounce timer
+            if (interruptionDebounceRef.current) {
+              clearTimeout(interruptionDebounceRef.current);
+            }
+            
+            // Wait before interrupting to ensure it's real user speech, not noise
+            const config = interruptionConfigRef.current;
+            interruptionDebounceRef.current = setTimeout(() => {
+              // Only interrupt if speech is still ongoing (didn't get speech_stopped quickly)
+              if (pendingInterruptionRef.current && speechStartedAtRef.current) {
+                const speechDuration = Date.now() - speechStartedAtRef.current;
+                // Only interrupt if user has been speaking long enough
+                if (speechDuration >= config.min_speech_duration_ms / 2) {
+                  addLog(`User interrupted (${speechDuration}ms speech) - stopping AI`, 'warning');
+                  stopAllAudio();
+                } else {
+                  addLog(`Ignoring brief noise (${speechDuration}ms)`, 'info');
+                }
+              }
+              pendingInterruptionRef.current = false;
+            }, config.debounce_ms);
+            
+            addLog('Speech detected, waiting to confirm interruption...', 'info');
+          } else {
+            // AI not speaking, proceed normally
+            addLog('Speech detected...', 'info');
           }
+          
           // Save previous completed exchange to history
           if (lastCompletedTranscriptRef.current || lastCompletedAiResponseRef.current) {
             const newEntries = [];
@@ -468,13 +509,45 @@ function App() {
             lastCompletedTranscriptRef.current = '';
             lastCompletedAiResponseRef.current = '';
           }
-          addLog('Speech detected...', 'info');
           setTranscript('(Listening...)');
           setAiResponse('');
           break;
           
         case 'input_audio_buffer.speech_stopped':
-          addLog('Processing...', 'info');
+          // Calculate how long the user spoke
+          const speechDuration = speechStartedAtRef.current 
+            ? Date.now() - speechStartedAtRef.current 
+            : 0;
+          
+          // If speech was very brief and we have a pending interruption, cancel it
+          const config = interruptionConfigRef.current;
+          if (pendingInterruptionRef.current && speechDuration < config.min_speech_duration_ms) {
+            // Speech was too brief - likely background noise, cancel interruption
+            addLog(`Speech too brief (${speechDuration}ms) - ignoring as noise`, 'info');
+            pendingInterruptionRef.current = false;
+            if (interruptionDebounceRef.current) {
+              clearTimeout(interruptionDebounceRef.current);
+              interruptionDebounceRef.current = null;
+            }
+            // Don't update transcript for noise
+            break;
+          }
+          
+          // Valid speech - confirm any pending interruption
+          if (pendingInterruptionRef.current && isStreamingRef.current) {
+            addLog(`Confirmed user interruption (${speechDuration}ms) - stopping AI`, 'warning');
+            stopAllAudio();
+            pendingInterruptionRef.current = false;
+            if (interruptionDebounceRef.current) {
+              clearTimeout(interruptionDebounceRef.current);
+              interruptionDebounceRef.current = null;
+            }
+          }
+          
+          // Reset speech tracking
+          speechStartedAtRef.current = null;
+          
+          addLog(`Processing... (spoke for ${speechDuration}ms)`, 'info');
           setTranscript('(Processing...)');
           break;
           
@@ -588,6 +661,15 @@ function App() {
         // Configure session using config from backend
         // Azure OpenAI Realtime API uses a different format than OpenAI
         const sessionConfig = config.session_config || {};
+        
+        // Load interruption config from backend (for smart debouncing)
+        if (sessionConfig.interruption_config) {
+          interruptionConfigRef.current = {
+            ...interruptionConfigRef.current,
+            ...sessionConfig.interruption_config
+          };
+          addLog(`Interruption config: min ${sessionConfig.interruption_config.min_speech_duration_ms}ms, debounce ${sessionConfig.interruption_config.debounce_ms}ms`, 'info');
+        }
         const instructions = sessionConfig.instructions || 'You are a helpful voice assistant.';
         const voice = sessionConfig.voice || 'alloy';
         
@@ -683,6 +765,14 @@ function App() {
   const stopSession = useCallback(() => {
     addLog('Stopping session...', 'info');
     
+    // Cleanup interruption debounce timer
+    if (interruptionDebounceRef.current) {
+      clearTimeout(interruptionDebounceRef.current);
+      interruptionDebounceRef.current = null;
+    }
+    pendingInterruptionRef.current = false;
+    speechStartedAtRef.current = null;
+    
     // Cleanup Sarvam recorder
     if (sarvamRecorderRef.current) {
       try { sarvamRecorderRef.current.stop(); } catch(e) {}
@@ -747,6 +837,7 @@ function App() {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      if (interruptionDebounceRef.current) clearTimeout(interruptionDebounceRef.current);
       if (sarvamRecorderRef.current) try { sarvamRecorderRef.current.stop(); } catch(e) {}
       if (workletNodeRef.current) workletNodeRef.current.disconnect();
       if (processorRef.current) processorRef.current.disconnect();

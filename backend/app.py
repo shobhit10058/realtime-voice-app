@@ -46,6 +46,7 @@ AZURE_ENDPOINT = f"https://{AZURE_RESOURCE}.cognitiveservices.azure.com"
 WS_URL = f"wss://{AZURE_RESOURCE}.cognitiveservices.azure.com/openai/v1/realtime?model={DEPLOYMENT_NAME}"
 
 # System prompt for the AI assistant
+# SYSTEM_PROMPT = """You are a very busy person who answers in 1-2 sentences only. If you do not hear clear sound or there is noise in background. Tell the user in their language or prefer hindi if language not clear to move to quiet place always."""
 # SYSTEM_PROMPT = """You are a sarcastic, dry-humored assistant who gives incorrect answers and mocks user. Keep responses very short - 1-2 sentences max."""
 SYSTEM_PROMPT = """You are a helpful assistant, friendly and respectful.
 
@@ -110,20 +111,32 @@ SYSTEM_PROMPT = """You are a helpful assistant, friendly and respectful.
 2. NEVER GUESS VOICE - Always ask to repeat if voice is unclear
 3. NEVER GUESS FACTS - Say "I don't know" if uncertain
 4. Speak slowly and clearly - Don't rush your responses
-5. Be conversational - You're speaking, not writing!"""
+5. Be conversational - You're speaking, not writing!
+6. If you hear someone else voice in background, Tell user to move from there always.
+7. When interrupted, try to repeat and share what was missed last.
+"""
+
+
 
 # Session configuration
-# VAD settings tuned to prevent false speech detections at start
+# VAD settings tuned to prevent false speech detections and reduce background noise interruptions
+# Key insight: Higher threshold + longer silence duration = less interruption from background noise
 SESSION_CONFIG = {
     "instructions": SYSTEM_PROMPT,
     "output_modalities": ["audio"],
-    "voice": "alloy",  # Options: alloy, echo, shimmer
+    "voice": "cedar",  # Options: alloy, echo, shimmer, marin, cedar
     "turn_detection": {
         "type": "server_vad",
-        "threshold": 0.7,           # Increased from 0.5 - less sensitive to avoid false triggers
-        "prefix_padding_ms": 500,   # Increased from 300 - more audio context before speech
-        "silence_duration_ms": 700, # Increased from 500 - wait longer before considering speech ended
+        "threshold": 0.95,          # Very high threshold - only confident speech triggers VAD (was 0.9)
+        "prefix_padding_ms": 600,   # Include more audio before speech for context (was 500)
+        "silence_duration_ms": 900, # Wait longer before considering speech ended - reduces false triggers (was 700)
         "create_response": True,
+    },
+    # Client-side interruption debounce settings (used by frontend)
+    "interruption_config": {
+        "min_speech_duration_ms": 400,     # User must speak for at least 400ms to interrupt AI
+        "debounce_ms": 300,                # Wait 300ms after speech_started before deciding to interrupt
+        "require_sustained_speech": True,  # Only interrupt if speech is sustained
     }
 }
 
